@@ -12,15 +12,15 @@ description: >
   in parallel", or when the agent determines that the work scope exceeds what a
   single agent can efficiently handle alone. Provides comprehensive guidance for
   using the ClawTeam CLI to orchestrate multi-agent teams with task management,
-  messaging, and monitoring.
-version: 0.2.0
+  messaging, monitoring, runtime profiles, git context, and recovery tooling.
+version: 0.3.0
 ---
 
 # ClawTeam Multi-Agent Coordination
 
 ClawTeam is a framework-agnostic CLI tool for coordinating multiple AI agents as a team.
-It provides file-based team management, inter-agent messaging, shared task tracking with
-dependency resolution, plan approval workflows, and terminal-based monitoring dashboards.
+It provides team/task management, inter-agent messaging, git worktree isolation, provider-aware
+runtime profiles, git context injection, snapshots, and terminal-based monitoring dashboards.
 
 All operations are performed via the `clawteam` CLI. Data is stored in `~/.clawteam/` by default.
 
@@ -34,85 +34,95 @@ Requires Python 3.10+. For P2P transport support: `pip install clawteam[p2p]`.
 
 ## Prerequisites
 
-- `tmux` installed (used by default spawn backend)
-- A CLI coding agent (e.g. `claude`, `codex`, or any command-line agent)
-- A git repository (for worktree isolation)
+- `tmux` installed (default spawn backend)
+- A CLI coding agent such as `claude`, `codex`, `gemini`, `kimi`, or `nanobot`
+- A git repository for worktree isolation and context features
+- Default dependencies installed if you want the TUI wizard (`clawteam profile wizard`)
 
 ## Core Concepts
 
-**Teams** — A named group of agents with one leader and zero or more workers. Created via
-`clawteam team spawn-team`. The leader approves joins, reviews plans, and coordinates shutdown.
+**Teams** — Named groups of agents with one leader and zero or more workers.
 
-**Inbox** — File-based message queue per agent. `inbox send` for point-to-point, `inbox broadcast`
-for all members. `inbox receive` consumes messages (destructive); `inbox peek` reads without consuming.
+**Inbox** — File-based message queue per agent. `receive` is destructive; `peek` is not.
 
-**Tasks** — Shared task board with statuses: `pending`, `in_progress`, `completed`, `blocked`.
-Tasks support dependency chains (`--blocks`, `--blocked-by`). Completing a task auto-unblocks dependents.
+**Tasks** — Shared task board with `pending`, `in_progress`, `completed`, and `blocked`.
+Tasks support dependency chains and priorities.
 
-**Board** — Terminal kanban dashboard. `board show` for single team, `board overview` for all teams,
-`board live` for real-time auto-refresh, `board attach` for tiled tmux view of all agents.
+**Profiles** — Reusable client/provider/runtime configs used by `spawn` and `launch`.
 
-**Identity** — Each agent has env vars (`CLAWTEAM_AGENT_ID`, `CLAWTEAM_AGENT_NAME`, `CLAWTEAM_AGENT_TYPE`,
-`CLAWTEAM_TEAM_NAME`). Set automatically when spawned via `clawteam spawn`.
+**Presets** — Shared provider templates used to generate one or more profiles.
+
+**Context** — Git/worktree-aware context tools for overlap checks, recent changes, and prompt injection.
+
+**Board** — Terminal kanban dashboard plus gource activity visualization.
 
 ## Quick Start
 
 ### Set Up a Team with Tasks
 
 ```bash
-# Set identity for the current session
 export CLAWTEAM_AGENT_ID="leader-001"
 export CLAWTEAM_AGENT_NAME="leader"
 export CLAWTEAM_AGENT_TYPE="leader"
 
-# Create team
 clawteam team spawn-team my-team -d "Project team" -n leader
-
-# Create tasks
 clawteam task create my-team "Design system" -o leader
 clawteam task create my-team "Implement feature" -o worker1
 clawteam task create my-team "Write tests" -o worker2
-
-# View board
 clawteam board show my-team
+```
+
+### Configure Runtime Profiles
+
+```bash
+# Inspect built-in provider templates
+clawteam preset list
+clawteam preset show moonshot-cn
+
+# Generate a reusable profile from a preset
+clawteam preset generate-profile moonshot-cn claude --name claude-kimi
+
+# Or use the interactive TUI
+clawteam profile wizard
+
+# Claude Code on a fresh machine/home may need onboarding repair once
+clawteam profile doctor claude
+
+# Smoke-test the profile before using it in a team
+MOONSHOT_API_KEY=... clawteam profile test claude-kimi
 ```
 
 ### Spawn and Coordinate Agents
 
 ```bash
-# Spawn workers — defaults: tmux backend, claude command, git worktree isolation, skip-permissions on
+# Default path: tmux backend, claude command, git worktree isolation, skip-permissions on
 clawteam spawn --team my-team --agent-name worker1 --task "Implement the auth module"
 clawteam spawn --team my-team --agent-name worker2 --task "Write unit tests"
 
-# Or explicitly specify backend and command (positional args: [BACKEND] [COMMAND])
+# Explicit backend and command
 clawteam spawn tmux claude --team my-team --agent-name worker3 --task "Build API endpoints"
 clawteam spawn subprocess claude --team my-team --agent-name worker4 --task "Run linting"
 
-# Watch all agents working simultaneously (tiled tmux panes)
+# Recommended for non-default providers/models
+clawteam spawn tmux --profile claude-kimi --team my-team --agent-name worker5 --task "Build API endpoints"
+clawteam spawn subprocess --profile gemini-vertex --team my-team --agent-name worker6 --task "Run linting"
+
 clawteam board attach my-team
-
-# Send instructions
 clawteam inbox send my-team worker1 "Start implementing the auth module"
-
-# Monitor task board
 clawteam board live my-team --interval 3
 ```
 
 ### Spawn Defaults
-
-Spawning agents uses sensible defaults — no flags needed for the common case:
 
 | Setting | Default | Override |
 |---------|---------|----------|
 | Backend | `tmux` | `clawteam spawn subprocess ...` |
 | Command | `claude` | `clawteam spawn tmux my-cmd ...` |
 | Workspace | `auto` (git worktree) | `--no-workspace` or config `workspace=never` |
-| Permissions | skip (no approval needed) | `--no-skip-permissions` or config `skip_permissions=false` |
+| Permissions | skip | `--no-skip-permissions` or config `skip_permissions=false` |
+| Runtime profile | none | `--profile <name>` |
 
-Agents spawned with defaults get:
-- Their own **git worktree** (isolated branch, no conflicts with other agents)
-- **Full tool permissions** (`--dangerously-skip-permissions`) so they can work autonomously
-- A **tmux window** you can watch with `board attach`
+Use `--profile` whenever you need a non-default provider, model, endpoint, or auth mapping.
 
 ### Task Lifecycle
 
@@ -120,57 +130,85 @@ Agents spawned with defaults get:
 # Create with dependencies
 clawteam task create my-team "Deploy" --blocked-by <impl-task-id>,<test-task-id>
 
+# Create with priority
+clawteam task create my-team "Hotfix prod issue" --priority high
+
 # Update status
 clawteam task update my-team <task-id> --status in_progress
-clawteam task update my-team <task-id> --status completed  # auto-unblocks dependents
+clawteam task update my-team <task-id> --status completed
 
 # Filter tasks
 clawteam task list my-team --status blocked
 clawteam task list my-team --owner worker1
+clawteam task list my-team --priority high
 ```
 
 ### Waiting for Sub-Agents
 
 ```bash
-# Block until all tasks complete (no timeout)
 clawteam task wait my-team
-
-# With timeout and custom poll interval
 clawteam task wait my-team --timeout 300 --poll-interval 10
-
-# Monitor a specific agent's inbox instead of the leader
 clawteam task wait my-team --agent coordinator
-
-# JSON streaming output (NDJSON: progress + message events, then final result)
 clawteam --json task wait my-team --timeout 600
 ```
 
-### Watching Agents Work
+### Git Context and Conflict Checks
 
 ```bash
-# Tile all agent tmux windows into one view (best way to observe)
-clawteam board attach my-team
-
-# Or attach to the tmux session manually and switch windows with Ctrl-b + number
-tmux attach -t clawteam-my-team
+clawteam context log my-team
+clawteam context conflicts my-team
+clawteam context inject my-team --agent worker1
 ```
+
+Use these before reassigning work, continuing another worker's task, or merging overlapping changes.
+
+### Snapshots and Recovery
+
+```bash
+clawteam team snapshot my-team --tag before-refactor
+clawteam team snapshots my-team
+clawteam team restore my-team --snapshot before-refactor
+```
+
+### Activity Visualization
+
+```bash
+clawteam board gource my-team --log-only
+clawteam board gource my-team --live
+```
+
+Prefer `--log-only` in headless environments.
+
+## Supported CLI Agents
+
+Common validated CLIs include:
+- `claude`
+- `codex`
+- `gemini`
+- `kimi`
+- `nanobot`
+
+Configure non-default providers through `profile` + `preset` instead of hardcoding env vars into prompts.
 
 ## Command Groups
 
 | Group | Purpose | Key Commands |
 |-------|---------|-------------|
-| `team` | Team lifecycle | `spawn-team`, `discover`, `status`, `request-join`, `approve-join`, `cleanup` |
+| `preset` | Shared provider templates | `list`, `show`, `generate-profile`, `bootstrap` |
+| `profile` | Reusable client/provider configs | `list`, `show`, `set`, `test`, `wizard`, `doctor` |
+| `team` | Team lifecycle | `spawn-team`, `discover`, `status`, `request-join`, `approve-join`, `cleanup`, `snapshot`, `restore` |
 | `inbox` | Messaging | `send`, `broadcast`, `receive`, `peek`, `watch` |
 | `task` | Task management | `create`, `get`, `update`, `list`, `wait` |
-| `board` | Monitoring | `show`, `overview`, `live`, `attach`, `serve` |
+| `board` | Monitoring and visualization | `show`, `overview`, `live`, `attach`, `serve`, `gource` |
+| `context` | Git/worktree context | `diff`, `files`, `conflicts`, `log`, `inject` |
 | `plan` | Plan approval | `submit`, `approve`, `reject` |
 | `lifecycle` | Agent lifecycle | `request-shutdown`, `approve-shutdown`, `idle` |
-| `spawn` | Process spawning | `spawn [backend] [command]` (defaults: tmux, claude) |
+| `spawn` | Process spawning | `spawn [backend] [command]` |
 | `identity` | Identity management | `show`, `set` |
 
 ## JSON Output
 
-All commands support `--json` for machine-readable output. Place the flag before the subcommand:
+All commands support `--json` for machine-readable output. Put the flag before the subcommand:
 
 ```bash
 clawteam --json team discover
@@ -178,29 +216,23 @@ clawteam --json board show my-team
 clawteam --json task list my-team --status pending
 ```
 
-Combine with `jq` for scripting:
-
-```bash
-clawteam --json board show my-team | jq '.taskSummary'
-clawteam --json task list my-team | jq '.[].subject'
-```
-
 ## Important Notes
 
-- `inbox receive` **consumes** messages (deletes files). Use `inbox peek` for non-destructive reads.
-- Task status `blocked` is **auto-set** when `--blocked-by` is specified at creation.
-- Completing a task **auto-unblocks** any tasks that list it in `blockedBy`.
-- `clawteam spawn` defaults to **tmux** backend with **git worktree** isolation and **skip-permissions**.
-- All file writes use atomic tmp+rename to prevent data corruption.
+- `inbox receive` consumes messages. Use `inbox peek` for non-destructive reads.
+- Task status `blocked` is auto-set when `--blocked-by` is specified at creation.
+- Completing a task auto-unblocks tasks that list it in `blockedBy`.
+- Tasks also support `priority`; use `high` for urgent unblockers and production fixes.
+- `clawteam spawn` defaults to tmux, git worktree isolation, and skip-permissions.
+- `clawteam launch` also respects `skip_permissions`, so template workers no longer stall on approval prompts.
+- All file writes use atomic tmp+rename to prevent corruption.
 - Identity env vars are set automatically when spawning via `clawteam spawn`.
 - Use `board attach <team>` to watch all agents in a tiled tmux layout.
+- Prefer `--profile` for non-default providers/models instead of manually exporting provider env vars.
+- `profile` is the final runtime object; `preset` is a reusable template for generating profiles.
+- For Claude Code on a fresh machine/home, run `clawteam profile doctor claude` once before spawning.
+- `context inject` and `context conflicts` are the recommended way to hand off cross-worktree tasks safely.
 
 ## Additional Resources
 
-### Reference Files
-
-For detailed command arguments, data models, and storage layout:
-- **`references/cli-reference.md`** — Complete CLI reference with all commands, options, and data models
-
-For step-by-step coordination workflows and common patterns:
-- **`references/workflows.md`** — Multi-agent workflows: team setup, spawn coordination, join protocol, plan approval, graceful shutdown, monitoring patterns
+- **`references/cli-reference.md`** — Complete CLI reference with commands, options, and data models
+- **`references/workflows.md`** — Multi-agent workflows: setup, spawn coordination, join protocol, plan approval, graceful shutdown, monitoring patterns
