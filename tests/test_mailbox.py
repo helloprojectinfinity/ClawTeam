@@ -1,6 +1,5 @@
 """Tests for clawteam.team.mailbox — MailboxManager send/receive/broadcast."""
 
-import fcntl
 import json
 import os
 import socket
@@ -10,7 +9,7 @@ from pathlib import Path
 from clawteam.team.mailbox import MailboxManager
 from clawteam.team.manager import TeamManager
 from clawteam.team.models import MessageType, get_data_dir
-from clawteam.transport.file import FileTransport
+from clawteam.transport.file import FileTransport, try_lock
 
 
 @staticmethod
@@ -331,7 +330,7 @@ class TestReceiveQuarantine:
         )
 
         with consumed.open("rb") as locked_file:
-            fcntl.flock(locked_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(locked_file)
             assert mb.receive("bob", limit=10) == []
             assert consumed.exists()
 
@@ -356,7 +355,7 @@ class TestReceiveQuarantine:
         )
 
         with consumed.open("rb") as locked_file:
-            fcntl.flock(locked_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(locked_file)
             assert mb.peek("bob") == []
             assert mb.peek_count("bob") == 0
 

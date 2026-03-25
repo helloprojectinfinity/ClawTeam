@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-import fcntl
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 import json
 import re
 import shutil
@@ -73,7 +79,15 @@ def _read_inbox_messages(directory: Path) -> list[dict]:
                 # `.consumed` files. This Unix-only `flock()` probe avoids
                 # active claims, but the result is advisory because the lock is
                 # released before the caller resumes.
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if sys.platform == "win32":
+                    pos = handle.tell()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    handle.seek(pos)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 continue
             try:
@@ -157,7 +171,7 @@ class SnapshotManager:
         tmp.write_text(
             json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        tmp.rename(path)
+        tmp.replace(path)
         return meta
 
     def list_snapshots(self) -> list[SnapshotMeta]:
@@ -270,4 +284,4 @@ class SnapshotManager:
 def _atomic_write(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(path)
+    tmp.replace(path)

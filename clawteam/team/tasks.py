@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-import fcntl
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 import json
 import os
 import tempfile
@@ -51,11 +57,23 @@ class TaskStore:
         lock_path = _tasks_lock_path(self.team_name)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if sys.platform == "win32":
+                pos = lock_file.tell()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                lock_file.seek(pos)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if sys.platform == "win32":
+                    pos = lock_file.tell()
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    lock_file.seek(pos)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def create(
         self,

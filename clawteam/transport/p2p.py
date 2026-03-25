@@ -130,7 +130,7 @@ class P2PTransport(Transport):
         info = self._peer_info()
         tmp = peer_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(info), encoding="utf-8")
-        tmp.rename(peer_file)
+        tmp.replace(peer_file)
 
     def _deregister_peer(self) -> None:
         """Remove peers/{agent}.json."""

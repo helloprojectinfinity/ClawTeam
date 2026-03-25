@@ -77,7 +77,7 @@ def save_config(cfg: ClawTeamConfig) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
-    tmp.rename(p)
+    tmp.replace(p)
 
 
 def get_effective(key: str) -> tuple[str, str]:

@@ -1,12 +1,41 @@
-"""File-based transport: messages stored as JSON files in inbox directories."""
-
-from __future__ import annotations
-
-import fcntl
 import json
 import time
 import uuid
 from pathlib import Path
+
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+    LOCK_EX = msvcrt.LK_NBLCK
+    LOCK_NB = 0
+else:
+    import fcntl
+    LOCK_EX = fcntl.LOCK_EX
+    LOCK_NB = fcntl.LOCK_NB
+
+def unlock(file_handle) -> None:
+    if sys.platform == "win32":
+        try:
+            pos = file_handle.tell()
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            file_handle.seek(pos)
+        except OSError:
+            pass
+
+def try_lock(file_handle) -> bool:
+    try:
+        if sys.platform == "win32":
+            pos = file_handle.tell()
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), LOCK_EX, 1)
+            file_handle.seek(pos)
+        else:
+            fcntl.flock(file_handle.fileno(), LOCK_EX | LOCK_NB)
+        return True
+    except OSError:
+        return False
 
 from clawteam.team.models import get_data_dir
 from clawteam.transport.base import Transport
@@ -48,11 +77,10 @@ def _is_locked(path: Path) -> bool:
     except Exception:
         return True
     try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        return False
+        locked = try_lock(handle)
+        if locked:
+            unlock(handle)
+        return not locked
     finally:
         handle.close()
 
@@ -76,12 +104,13 @@ class FileTransport(Transport):
         data: bytes,
     ) -> ClaimedMessage:
         def _ack() -> None:
-            try:
-                consumed_path.unlink(missing_ok=True)
-            finally:
-                file_handle.close()
+            unlock(file_handle)
+            file_handle.close()
+            consumed_path.unlink(missing_ok=True)
 
         def _quarantine(error: str) -> None:
+            unlock(file_handle)
+            file_handle.close()
             self._quarantine_bytes(
                 agent_name,
                 data,
@@ -89,7 +118,6 @@ class FileTransport(Transport):
                 source_name=original_path.name,
                 consumed_path=consumed_path,
             )
-            file_handle.close()
 
         return ClaimedMessage(data=data, ack=_ack, quarantine=_quarantine)
 
@@ -115,7 +143,7 @@ class FileTransport(Transport):
             if path.suffix == ".json":
                 consumed = path.with_suffix(".consumed")
                 try:
-                    path.rename(consumed)
+                    path.replace(consumed)
                 except OSError:
                     continue
             try:
@@ -124,14 +152,13 @@ class FileTransport(Transport):
                 consumed.unlink(missing_ok=True)
                 continue
 
-            try:
-                fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            if not try_lock(file_handle):
                 file_handle.close()
                 continue
             try:
                 data = file_handle.read()
             except Exception:
+                unlock(file_handle)
                 file_handle.close()
                 consumed.unlink(missing_ok=True)
                 continue
