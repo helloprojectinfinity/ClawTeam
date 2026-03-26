@@ -1,322 +1,426 @@
-# R1: AI Agent 未來發展趨勢 — 技術架構分析
+# R1: OpenClaw 架構設計深度分析
 
 > Researcher: researcher-arch
-> Focus: 多 Agent 協調機制、自動化工作流、記憶系統
+> Focus: OpenClaw 技術架構、多 Agent 協調機制、記憶系統（memory-lancedb-pro）
 > Date: 2026-03-26
 
 ---
 
-## Executive Summary
+## 1. 整體架構總覽
 
-AI Agent 正從「單一對話助手」演進為「自主協作的數位團隊」。2026 年係關鍵轉折點：
-- Gartner 報告多 Agent 系統查詢量從 2024 Q1 到 2025 Q2 **暴增 1,445%**
-- 市場預計從 78 億美元成長至 2030 年 520 億美元
-- 40% 企業應用將嵌入 AI Agent（2025 年僅 5%）
-- 協議標準化（MCP + A2A）正在建立「Agent 互聯網」嘅基礎
+OpenClaw 係一個 **AI Agent Gateway**，核心設計理念係「一個長壽 Gateway 進程管理所有通訊表面」。佢唔係一個簡單嘅 chatbot wrapper，而係一個完整嘅 agent 運行時平台。
 
-本報告從技術架構角度分析三大核心趨勢。
+### 1.1 核心架構
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Gateway Daemon (長壽進程)                  │
+│  ┌──────────┬──────────┬──────────┬──────────┬───────────┐  │
+│  │ WhatsApp │ Telegram │ Discord  │  Signal  │  Slack    │  │
+│  │ (Baileys)│(grammY)  │          │          │           │  │
+│  └────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬──────┘  │
+│       │          │          │          │          │           │
+│  ┌────▼──────────▼──────────▼──────────▼──────────▼──────┐  │
+│  │              Channel Plugin Registry                   │  │
+│  └───────────────────────┬───────────────────────────────┘  │
+│                          │                                   │
+│  ┌───────────────────────▼───────────────────────────────┐  │
+│  │              Agent Loop Engine                         │  │
+│  │  Session Mgmt → Context Assembly → Model Inference     │  │
+│  │  → Tool Execution → Streaming Replies → Persistence    │  │
+│  └───────────────────────┬───────────────────────────────┘  │
+│                          │                                   │
+│  ┌──────────┬────────────┼────────────┬──────────────────┐  │
+│  │ Memory   │  Plugins   │  Cron      │  Sub-agents      │  │
+│  │ System   │  Registry  │  Scheduler │  (sessions_spawn) │  │
+│  └──────────┴────────────┴────────────┴──────────────────┘  │
+│                                                              │
+│  WebSocket API (127.0.0.1:18789)                             │
+│  ├── Clients (macOS app, CLI, WebChat)                       │
+│  └── Nodes (macOS, iOS, Android, headless)                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 關鍵設計原則
+
+| 原則 | 實現 |
+|------|------|
+| **單一 Gateway** | 一個進程管理所有 channel 連接、session、tool 執行 |
+| **Session 為核心** | 每個對話係一個 session，有獨立嘅 context window 同 transcript |
+| **Plugin 架構** | 所有外部整合（provider、channel、memory）都係 plugin |
+| **Workspace 隔離** | 每個 agent 有獨立嘅 workspace（AGENTS.md、SOUL.md、skills） |
+| **Tool Policy** | 細粒度嘅工具權限控制（allow/deny/elevated） |
 
 ---
 
-## 1. 多 Agent 協調：AI 嘅「微服務時刻」
+## 2. 多 Agent 協調機制
 
-### 1.1 從單體到分佈式
+### 2.1 Agent 定義
 
-正如單體應用演進為微服務架構，單一全能 Agent 正被**專業化 Agent 團隊**取代。
-
-**核心設計模式：**
-
-| 模式 | 描述 | 代表框架 |
-|------|------|----------|
-| **Orchestrator-Worker** | Leader 分配任務給 Specialist | ClawTeam, CrewAI |
-| **Conversation-Driven** | Agent 透過對話驅動協作 | AutoGen |
-| **State Machine** | 用狀態圖管理 Agent 工作流 | LangGraph |
-| **Peer-to-Peer** | Agent 自主發現同協作 | OpenAgents |
-
-**關鍵發現（2026 年框架比較）：**
-
-- **LangGraph**：最適合 production-grade，狀態圖管理最嚴謹，token 效率最高
-- **CrewAI**：角色定義最直覺，每日處理超過 1,200 萬次執行
-- **AutoGen**：延遲最低，適合 Microsoft 生態系統
-- **OpenAgents**：唯一原生支持 MCP + A2A 嘅框架
-
-### 1.2 協調挑戰
-
-多 Agent 系統引入咗單 Agent 系統唔存在嘅核心挑戰：
+OpenClaw 中嘅「一個 Agent」係一個完全隔離嘅大腦：
 
 ```
-挑戰 1: Agent 間通訊協議
-    → MCP 解決 Agent ↔ 工具通訊
-    → A2A 解決 Agent ↔ Agent 通訊
-
-挑戰 2: 跨 Agent 狀態管理
-    → Task 依賴圖（DAG）
-    → 共享上下文傳遞
-
-挑戰 3: 衝突解決
-    → 多 Agent 修改同一文件
-    → 資源競爭
-
-挑戰 4: 錯誤恢復
-    → Agent crash 後嘅 task 重試
-    → 部分失敗嘅回滾機制
+Agent = Workspace（文件、AGENTS.md/SOUL.md/USER.md）
+      + State Directory（auth profiles、model registry）
+      + Session Store（聊天歷史 + 路由狀態）
+      + 獨立嘅 credentials（唔自動共享）
 ```
 
-### 1.3 ClawTeam 嘅架構選擇
+### 2.2 路由機制
 
-ClawTeam 採用 **Orchestrator-Worker + File-based State** 模式：
-- Leader Agent 透過 `clawteam spawn` 創建 Worker
-- Task Store 用 JSON file + file lock 做並發控制
-- `blocked_by` 實現 DAG 依賴（完成觸發 cascade unlock）
-- 但 **唔自動 spawn** —— 解鎖後需要 agent 自己 poll
+**Binding 系統**決定邊個 message 去邊個 agent：
 
-呢個設計簡單可靠，但缺少自動 handoff 機制。
+```
+路由優先級（most-specific wins）：
+1. peer match（精確 DM/group/channel ID）
+2. parentPeer match（thread 繼承）
+3. guildId + roles（Discord 角色路由）
+4. guildId（Discord）
+5. teamId（Slack）
+6. accountId match
+7. channel-level match
+8. fallback to default agent
+```
+
+**設計亮點：** 同一個 Gateway 可以運行多個完全隔離嘅 agent，每個 agent 有自己嘅：
+- Workspace（唔同嘅 SOUL.md = 唔同嘅人格）
+- Model（一個用 Sonnet，一個用 Opus）
+- Sandbox（一個冇沙盒，一個嚴格沙盒）
+- Tool Policy（一個全權限，一個只讀）
+
+### 2.3 Sub-agent 系統
+
+OpenClaw 透過 `sessions_spawn` 實現子代理：
+
+```python
+# 兩種 runtime：
+sessions_spawn(runtime="subagent")  # OpenClaw 內部子代理
+sessions_spawn(runtime="acp")       # ACP 協議（Codex、Claude Code 等外部 agent）
+```
+
+**子代理特點：**
+- 繼承父 session 嘅 workspace directory
+- 可以 streaming 回傳結果（`streamTo: "parent"`）
+- 支持 one-shot（`mode="run"`）同 persistent（`mode="session"`）模式
+- Thread-bound 模式支持 Discord thread 等場景
+
+### 2.4 與 ClawTeam 嘅對比
+
+| 特性 | OpenClaw | ClawTeam |
+|------|----------|----------|
+| Agent 啟動 | `sessions_spawn`（in-process） | `tmux new-window`（獨立進程） |
+| 通訊 | Session-based（共享狀態） | File-based inbox（JSON files） |
+| 隔離級別 | Workspace + Session + Auth | Git worktree + Inbox directory |
+| 協調者 | Gateway（自動路由） | Leader Agent（手動協調） |
+| Task 管理 | 冇內建 task 系統 | 完整嘅 DAG task 系統 |
 
 ---
 
-## 2. 協議標準化：MCP + A2A 建立 Agent 互聯網
+## 3. Session 管理系統
 
-### 2.1 MCP（Model Context Protocol）
+### 3.1 Session Key 結構
 
-**由 Anthropic 於 2024 年底推出，2025 年廣泛採用。**
-
-- **功能**：標準化 Agent 如何連接外部工具、數據庫、API
-- **類比**：好似 USB-C —— 一個協議連接所有設備
-- **現狀**：2026 年 2 月 SDK 月下載量達 9,700 萬次
-- **採用者**：Anthropic、OpenAI、Google、Microsoft、Amazon
-
-**架構意義：**
 ```
-Agent (LLM)
-    ↓ MCP
-┌─────────┬─────────┬─────────┐
-│ Database │  API   │  Tool   │
-└─────────┴─────────┴─────────┘
+Direct (main):    agent:<agentId>:<mainKey>
+Direct (per-peer): agent:<agentId>:direct:<peerId>
+Group:            agent:<agentId>:<channel>:group:<id>
+Channel:          agent:<agentId>:<channel>:channel:<id>
+Cron (isolated):  cron:<jobId>
+Cron (persistent): session:<custom-id>
+Sub-agent:        agent:<agentId>:subagent:<label>
 ```
 
-以前每個工具要 custom integration，而家 plug-and-play。
+### 3.2 Session 生命週期
 
-### 2.2 A2A（Agent-to-Agent Protocol）
-
-**由 Google 於 2025 年 4 月推出，現由 Linux Foundation 管理。**
-
-- **功能**：定義 Agent 之間點樣通訊、發現、協作
-- **類比**：好似 HTTP —— 任何瀏覽器可以訪問任何伺服器
-- **核心能力**：
-  - Agent 發現（Agent Card）
-  - 任務協商（Task Negotiation）
-  - 資料交換（Artifact Exchange）
-
-**架構意義：**
 ```
-Agent A ←──A2A──→ Agent B ←──A2A──→ Agent C
-  │                │                │
-  MCP              MCP              MCP
-  │                │                │
- Tool X          Tool Y           Tool Z
+Daily Reset（預設 4:00 AM）
+    +
+Idle Reset（可選，sliding window）
+    ↓
+兩者取先到期者 → 觸發新 session
 ```
 
-### 2.3 MCP vs A2A 嘅分工
+### 3.3 Context 組裝流程
 
-| 協議 | 層次 | 解決嘅問題 |
-|------|------|------------|
-| **MCP** | Agent ↔ 外部世界 | Agent 點樣使用工具同數據 |
-| **A2A** | Agent ↔ Agent | Agent 點樣互相通訊同協作 |
+```
+1. System Prompt（base + skills + bootstrap + per-run overrides）
+2. Session History（JSONL transcript）
+3. Memory Files（MEMORY.md + memory/YYYY-MM-DD.md）
+4. Tool Results
+5. Compaction（當 context window 接近上限時自動壓縮）
+```
 
-兩者互補，唔係競爭。MCP 裝備 Agent 嘅能力，A2A 連接 Agent 成為團隊。
+### 3.4 Compaction 機制
+
+當 session 接近 auto-compaction 閾值時：
+1. 觸發 **silent memory flush**（提醒 model 寫入持久記憶）
+2. 壓縮舊嘅 context（summarize older messages）
+3. 釋放 token 空間
 
 ---
 
-## 3. 記憶系統：從無狀態到持續學習
+## 4. 記憶系統：memory-lancedb-pro
 
-### 3.1 問題根源
+### 4.1 架構總覽
 
-LLM 本質上係 **無狀態** 嘅：
-- 只能喺有限嘅 context window 內運作
-- context window 越大，信號衰減越嚴重
-- 無法可靠地喺多次互動之間傳遞資訊
-
-呢個限制係構建真正持久、協作、個人化 Agent 嘅核心障礙。
-
-### 3.2 四大記憶架構模式
-
-#### 模式 1：MemGPT — 操作系統模式
-
-將記憶視為 **計算資源管理** 問題，虛擬化 LLM context 以模擬無限容量。
+memory-lancedb-pro 係一個 **LanceDB-backed 增強記憶插件**，提供：
 
 ```
-┌─────────────────────────────────────┐
-│         Primary Context (RAM)       │
-│  ┌──────────┬──────────┬─────────┐  │
-│  │ System   │ Working  │ FIFO    │  │
-│  │ Prompt   │ Context  │ Buffer  │  │
-│  └──────────┴──────────┴─────────┘  │
-├─────────────────────────────────────┤
-│       External Context (Disk)       │
-│  ┌──────────────┬──────────────┐    │
-│  │ Recall       │ Archival     │    │
-│  │ Storage      │ Storage      │    │
-│  │ (事件日誌)   │ (向量記憶)   │    │
-│  └──────────────┴──────────────┘    │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           memory-lancedb-pro Plugin          │
+├─────────────────────────────────────────────┤
+│  Smart Extractor    │  Noise Filter         │
+│  (LLM-based 提取)   │  (過濾噪音記憶)       │
+├─────────────────────────────────────────────┤
+│  Hybrid Retriever                          │
+│  ├── Vector Search（語義相似度）             │
+│  ├── BM25 Search（關鍵詞匹配）               │
+│  └── Cross-encoder Rerank（重排序）          │
+├─────────────────────────────────────────────┤
+│  Decay Engine      │  Tier Manager          │
+│  (時間衰減)         │  (核心/工作/邊緣分層)   │
+├─────────────────────────────────────────────┤
+│  Scope Manager                             │
+│  (多範圍隔離：user/agent/session/project)    │
+├─────────────────────────────────────────────┤
+│  LanceDB Storage                           │
+│  (向量數據庫 + 元數據)                       │
+└─────────────────────────────────────────────┘
 ```
 
-**運作機制：**
-- 當 Primary Context 接近容量閾值（如 70%），系統插入內部警告
-- LLM 自主決定保留咩、丟棄咩、存儲到邊度
-- 實現咗「無限 context window」嘅錯覺
+### 4.2 核心組件
 
-**優勢：** 自主管理、優雅嘅抽象
-**劣勢：** 記憶管理消耗推理帶寬、非結構化查詢困難
+#### Embedding 層
+- 支持 **OpenAI-compatible** 嘅 embedding provider
+- 支持多 API key round-robin rotation
+- 自動 chunking（長文檔自動分段）
+- 可配置 dimensions、task query/passage
 
-#### 模式 2：OpenAI Memory — 產品驅動模式
+#### 混合檢索（Hybrid Retrieval）
+```python
+# 檢索流程
+Query
+    ├── Vector Search → 候選集 A（語義相似）
+    ├── BM25 Search  → 候選集 B（關鍵詞匹配）
+    └── Merge + Weighted Score
+            ↓
+    Cross-encoder Rerank（可選）
+            ↓
+    Final Results
+```
 
-- **Saved Memories**：跨對話持久化嘅事實（用戶自動/手動提供）
-- **Chat History Search**：語義搜索歷史對話
-- **類比**：好似一個秘書自動記住你講過嘅每件事
+**權重配置：**
+- `vectorWeight`：向量搜索權重
+- `bm25Weight`：BM25 搜索權重
+- `minScore`：最低分數閾值
+- `candidatePoolSize`：候選池大小
 
-#### 模式 3：Claude Memory — 用戶控制模式
+#### 時間衰減（Decay Engine）
+```python
+# 記憶重要度 = f(時間, 訪問頻率, 內在重要度)
+score = base_score * decay_factor
 
-- **Project-scoped**：記憶侷限於特定項目
-- **用戶決定**：咩要記、咩唔記
-- **類比**：好似一個有嚴格保密協議嘅顧問
+# 衰減因子
+decay_factor = exp(-λ * age_days)
 
-#### 模式 4：Mem0 — 生產級記憶系統
+# 可配置參數：
+- recencyHalfLifeDays：最近性半衰期
+- frequencyWeight：訪問頻率權重
+- intrinsicWeight：內在重要度權重
+- importanceModulation：重要度調節
+```
 
-2025 年 arXiv 論文提出嘅 production-ready 方案：
-- **動態更新**：用戶話「我搬咗去台北」→ 自動刪除舊地址、添加新地址
-- **向量 + 關鍵詞混合檢索**
-- **LOCOMO benchmark** 上超越 6 種 baseline
+#### 分層管理（Tier Manager）
+```
+Core Memory（核心記憶）
+    → 高訪問頻率 + 高重要度
+    → 較慢衰減（betaCore）
 
-### 3.3 記憶類型分類
+Working Memory（工作記憶）
+    → 中等訪問頻率
+    → 中等衰減（betaWorking）
 
-基於認知科學，Agent 記憶分為三種類型：
+Peripheral Memory（邊緣記憶）
+    → 低訪問頻率 + 較舊
+    → 較快衰減（betaPeripheral）
+```
 
-| 類型 | 功能 | 實現方式 |
-|------|------|----------|
-| **Episodic**（情景記憶） | 記住特定事件 | 對話日誌、事件序列 |
-| **Semantic**（語義記憶） | 記住事實知識 | 向量數據庫、知識圖譜 |
-| **Procedural**（程序記憶） | 記住點樣做事 | 微調後嘅模型參數 |
+#### 多範圍隔離（Scope Manager）
+```python
+scopes = {
+    "default": "通用記憶",
+    "user": "用戶專屬記憶",
+    "agent": "Agent 專屬記憶",
+    "session": "Session 專屬記憶",
+    "project": "項目專屬記憶"
+}
+```
 
-### 3.4 ICLR 2026 Workshop：MemAgents
+### 4.3 Smart Extraction
 
-學術界正積極推進 Agent 記憶研究：
-- **ICLR 2026** 舉辦 MemAgents Workshop
-- 涵蓋：episodic、semantic、working、parametric memory
-- 探索記憶同外部存儲嘅接口設計
+**自動從對話中提取持久記憶：**
+1. 監控對話 messages（`extractMinMessages` 閾值）
+2. 用 LLM 分析對話內容
+3. 提取事實、偏好、決定等
+4. 過濾噪音（NoisePrototypeBank）
+5. 存入 LanceDB（含 smart metadata）
+
+### 4.4 Session Reflection
+
+```python
+# 兩種 session 策略
+sessionStrategy = "memoryReflection"  # Plugin 自己做 reflection
+sessionStrategy = "systemSessionMemory"  # 用 OpenClaw 內建嘅 session memory
+sessionStrategy = "none"  # 唔做 session summary（預設）
+```
+
+**Memory Reflection 流程：**
+1. Session 結束時觸發
+2. LLM 分析 session 內容
+3. 生成 reflection slices
+4. 存入 LanceDB（含 derived metadata）
+5. 可選注入到下一個 session（inheritance + derived）
+
+### 4.5 與 OpenClaw 預設 Memory 嘅對比
+
+| 特性 | OpenClaw Default | memory-lancedb-pro |
+|------|------------------|-------------------|
+| 存儲 | Markdown files | LanceDB（向量數據庫） |
+| 檢索 | file read + vector index | Hybrid（vector + BM25 + rerank） |
+| 範圍 | workspace-level | multi-scope（user/agent/session/project） |
+| 衰減 | 無（手動清理） | 自動時間衰減 + 分層管理 |
+| 提取 | 手動（model 自己決定） | Smart Extraction（LLM-based 自動提取） |
+| 噪音過濾 | 無 | NoisePrototypeBank |
+| Session Reflection | 內建 compaction | Plugin-level reflection |
 
 ---
 
-## 4. 自動化工作流：從 Prompt 到 Process
+## 5. Plugin 系統
 
-### 4.1 工作流編排模式
+### 5.1 四層架構
 
 ```
-模式 1: Sequential（順序）
-    Agent A → Agent B → Agent C
+Layer 1: Manifest + Discovery
+    → 從配置路徑、workspace、global extension root 發現 plugin
 
-模式 2: Parallel（並行）
-    ┌→ Agent A →┐
-    │           ↓
-Goal ┼→ Agent B →┼→ Integrator
-    │           ↑
-    └→ Agent C →┘
+Layer 2: Enablement + Validation
+    → 決定 plugin 係 enabled/disabled/blocked/selected
 
-模式 3: Hierarchical（層級）
-    Leader
-    ├── Manager A
-    │   ├── Worker A1
-    │   └── Worker A2
-    └── Manager B
-        ├── Worker B1
-        └── Worker B2
+Layer 3: Runtime Loading
+    → Native plugin 透過 jiti in-process 加載
+    → Compatible bundle 作為 metadata/content pack
 
-模式 4: DAG（有向無環圖）
-    Task1 ──→ Task3 ──→ Task5
-      ↓         ↑
-    Task2 ──→ Task4
+Layer 4: Surface Consumption
+    → Registry 暴露 tools、channels、providers、hooks、routes
 ```
 
-### 4.2 企業落地挑戰
+### 5.2 Capability Model
 
-**McKinsey 研究發現：**
-- 近 2/3 組織正在試驗 AI Agent
-- 但 **少於 1/4 成功擴展到 production**
-- 高績效組織擴展 Agent 嘅可能性係同行嘅 3 倍
+| Capability | Registration Method | Example |
+|------------|---------------------|---------|
+| Text Inference | `api.registerProvider(...)` | openai, anthropic |
+| Speech | `api.registerSpeechProvider(...)` | elevenlabs, microsoft |
+| Media Understanding | `api.registerMediaUnderstandingProvider(...)` | openai, google |
+| Image Generation | `api.registerImageGenerationProvider(...)` | openai, google |
+| Web Search | `api.registerWebSearchProvider(...)` | google |
+| Channel | `api.registerChannel(...)` | msteams, matrix |
+| Memory | `plugins.slots.memory` | memory-lancedb-pro |
+| Context Engine | `api.registerContextEngine(...)` | 自定義 context 管線 |
 
-**成功關鍵：**
-1. **重新設計工作流**，唔係將 Agent 疊加喺舊流程上
-2. **Agent-first thinking**：先諗 Agent 點做，再諗人點配合
-3. **清晰嘅成功指標**：唔係「用咗 Agent」，而係「效率提升咗幾多」
+### 5.3 Plugin 執行模型
 
-### 4.3 2026 年主要落地領域
+**Native OpenClaw plugin 跟 Gateway 同一個 process。** 唔係 sandboxed。
 
-| 領域 | 用途 | 成熟度 |
-|------|------|--------|
-| IT 運維 | 自動化監控、故障排除 | ★★★★☆ |
-| 客戶服務 | 智能客服、問題分類 | ★★★★☆ |
-| 軟件工程 | 代碼生成、審查、測試 | ★★★☆☆ |
-| 供應鏈 | 需求預測、路線優化 | ★★★☆☆ |
-| 研究分析 | 文獻回顧、數據分析 | ★★☆☆☆ |
+Implications：
+- 可以 register tools、network handlers、hooks、services
+- Bug 可以 crash Gateway
+- 惡意 plugin = 任意代碼執行
 
 ---
 
-## 5. 架構趨勢總結
+## 6. Agent Loop
 
-### 5.1 2026 年七大趨勢
-
-1. **多 Agent 編排**：從單體到微服務式 Agent 團隊
-2. **協議標準化**：MCP + A2A 建立 Agent 互聯網
-3. **企業擴展 Gap**：從實驗到 production 嘅鴻溝
-4. **治理與安全**：成為競爭差異化因素
-5. **記憶系統**：從無狀態到持續學習
-6. **小型模型**：SLM 成為 Agent 嘅 cost-effective 選擇
-7. **Agent 經濟**：可互操作嘅 Agent 市場正在形成
-
-### 5.2 技術架構建議
-
-對於構建多 Agent 系統，建議關注：
+### 6.1 執行流程
 
 ```
-Layer 1: 協議層
-    → MCP（工具連接）+ A2A（Agent 通訊）
-
-Layer 2: 編排層
-    → 狀態管理（DAG / State Machine）
-    → 衝突解決機制
-
-Layer 3: 記憶層
-    → Episodic + Semantic + Procedural
-    → 動態更新 + 混合檢索
-
-Layer 4: 監控層
-    → Agent 生命週期管理
-    → 成本追蹤
-    → 錯誤恢復
+Message In
+    ↓
+Gateway RPC: agent
+    ↓
+1. Validate params + resolve session
+2. Persist session metadata
+3. Return { runId, acceptedAt } immediately
+    ↓
+AgentCommand (async):
+    ├── Resolve model + thinking/verbose defaults
+    ├── Load skills snapshot
+    ├── Call runEmbeddedPiAgent
+    │   ├── Serialize runs（per-session + global queue）
+    │   ├── Resolve model + auth profile
+    │   ├── Build pi session
+    │   ├── Subscribe to pi events
+    │   ├── Stream assistant/tool deltas
+    │   └── Enforce timeout → abort if exceeded
+    └── Emit lifecycle end/error
+    ↓
+Stream to Client:
+    ├── tool events → stream: "tool"
+    ├── assistant deltas → stream: "assistant"
+    └── lifecycle events → stream: "lifecycle"
 ```
 
-### 5.3 對 OpenClaw / ClawTeam 嘅啟示
+### 6.2 並發控制
 
-| 趨勢 | 對應現狀 | 建議 |
-|------|----------|------|
-| 多 Agent 編排 | ClawTeam 已實現 | 加強自動 handoff |
-| MCP + A2A | 未整合 | 考慮 native 支持 |
-| 記憶系統 | OpenClaw memory-lancedb-pro | 升級為三層記憶架構 |
-| 企業擴展 | 仍在 POC 階段 | 建立 production-ready 流程 |
-| Agent 經濟 | ClawHub 技能市場 | 擴展為 Agent 服務市場 |
+- **Per-session serialization**：同一個 session 嘅 runs 係 sequential
+- **Global lane**（可選）：全局序列化
+- **Queue modes**：collect/steer/followup（控制 message 點排隊）
+
+---
+
+## 7. 設計模式總結
+
+### 7.1 OpenClaw 嘅核心設計哲學
+
+1. **Gateway-centric**：所有嘢都經過 Gateway，佢係唯一嘅 source of truth
+2. **Session-first**：Session 係核心抽象，唔係 message
+3. **Plugin-extensible**：所有外部整合都係 plugin，core 只定義 capability contract
+4. **Workspace-as-brain**：AGENTS.md/SOUL.md 就係 agent 嘅人格同規則
+5. **Markdown memory**：記憶係 plain Markdown，model 只記住寫落 disk 嘅嘢
+
+### 7.2 與其他系統嘅架構對比
+
+| 系統 | 核心抽象 | Agent 協調 | 記憶 | 部署 |
+|------|----------|-----------|------|------|
+| **OpenClaw** | Session + Workspace | Multi-agent routing | Markdown + Plugin | Single Gateway |
+| **ClawTeam** | Task + Inbox | Leader orchestration | File-based | tmux processes |
+| **AutoGen** | Conversation | Chat-driven | Stateless | Python runtime |
+| **CrewAI** | Role + Task | Crew orchestration | RAG | Python runtime |
+| **LangGraph** | State Machine | Graph-based | Checkpoint | Python runtime |
+
+### 7.3 OpenClaw 嘅獨特優勢
+
+1. **多 Channel 統一管理**：一個 Gateway 管 WhatsApp、Telegram、Discord 等
+2. **Session 持久化**：自動 compaction、daily reset、idle reset
+3. **Plugin 生態**：memory-lancedb-pro 就係一個好例子
+4. **Node 系統**：手機/平板都可以作為 agent node
+5. **Canvas**：agent 可以生成 HTML/CSS/JS UI
+
+### 7.4 已知限制
+
+1. **冇內建嘅 multi-agent task 系統**：OpenClaw 冇 DAG task 依賴管理（呢個係 ClawTeam 補充嘅部分）
+2. **冇自動 handoff**：Sub-agent 完成後唔會自動觸發下一個（需要外部 cron/heartbeat）
+3. **Plugin 唔 sandboxed**：native plugin 有同 core 一樣嘅信任邊界
+4. **Single Gateway per host**：冇 built-in 嘅分布式支持
 
 ---
 
 ## Sources
 
-- Gartner: Multi-agent system inquiries surged 1,445% (Q1 2024 → Q2 2025)
-- MarketsandMarkets: AI agent market $7.8B → $52B by 2030
-- McKinsey: Fewer than 1/4 organizations scaled agents to production
-- IBM: 2026 should be the year multi-agent systems move into production
-- Deloitte: Autonomous AI agent market could reach $8.5B by 2026
-- Mem0 paper (arXiv 2504.19413): Production-ready long-term memory
-- ICLR 2026 MemAgents Workshop: Memory architectures for LLM agents
-- A2A Protocol (Linux Foundation): Agent-to-Agent communication standard
-- MCP (Anthropic): 97M monthly SDK downloads by Feb 2026
-- CrewAI: 12M+ daily enterprise executions
-- LangGraph vs CrewAI vs AutoGen comparisons (multiple sources, 2026)
+- OpenClaw 官方文檔：`/docs/concepts/architecture.md`
+- OpenClaw 官方文檔：`/docs/concepts/multi-agent.md`
+- OpenClaw 官方文檔：`/docs/concepts/memory.md`
+- OpenClaw 官方文檔：`/docs/concepts/session.md`
+- OpenClaw 官方文檔：`/docs/concepts/delegate-architecture.md`
+- OpenClaw 官方文檔：`/docs/plugins/architecture.md`
+- OpenClaw 官方文檔：`/docs/concepts/agent-loop.md`
+- memory-lancedb-pro source code：`~/.openclaw/extensions/memory-lancedb-pro/`
