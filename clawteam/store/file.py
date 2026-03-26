@@ -89,10 +89,11 @@ class FileTaskStore(BaseTaskStore):
             blocked_by=blocked_by or [],
             metadata=metadata or {},
         )
-        self._validate_blocked_by_unlocked(task.id, task.blocked_by)
-        if task.blocked_by:
-            task.status = TaskStatus.blocked
         with self._write_lock():
+            existing_tasks = self._list_tasks_unlocked()
+            self._validate_blocked_by_unlocked(task.id, task.blocked_by, existing_tasks)
+            if task.blocked_by:
+                task.status = TaskStatus.blocked
             self._save_unlocked(task)
         return task
 
@@ -254,14 +255,20 @@ class FileTaskStore(BaseTaskStore):
             tasks.sort(key=lambda task: (priority_order.get(task.priority, 2), task.created_at, task.id))
         return tasks
 
-    def _validate_blocked_by_unlocked(self, task_id: str, blocked_by: list[str]) -> None:
+    def _validate_blocked_by_unlocked(self, task_id: str, blocked_by: list[str], _tasks_cache: list[TaskItem] | None = None) -> None:
         if task_id in blocked_by:
             raise ValueError(f"Task '{task_id}' cannot be blocked by itself")
 
-        graph: dict[str, list[str]] = {
-            task.id: list(task.blocked_by)
-            for task in self._list_tasks_unlocked()
-        }
+        if _tasks_cache is not None:
+            graph: dict[str, list[str]] = {
+                task.id: list(task.blocked_by)
+                for task in _tasks_cache
+            }
+        else:
+            graph = {
+                task.id: list(task.blocked_by)
+                for task in self._list_tasks_unlocked()
+            }
         graph[task_id] = list(blocked_by)
 
         visiting: set[str] = set()
@@ -301,6 +308,11 @@ class FileTaskStore(BaseTaskStore):
             raise
 
     def _resolve_dependents_unlocked(self, completed_task_id: str) -> None:
+        """Resolve dependents when a task completes.
+
+        Reads all task files to find blocked_by references. This is O(N) but
+        only called on task completion, which is infrequent compared to reads.
+        """
         root = _tasks_root(self.team_name)
         for f in root.glob("task-*.json"):
             try:
@@ -314,3 +326,20 @@ class FileTaskStore(BaseTaskStore):
                     self._save_unlocked(task)
             except Exception:
                 continue
+
+    def _build_task_index(self) -> dict[str, TaskItem]:
+        """Build an in-memory index of all tasks for efficient lookups.
+
+        Returns a dict mapping task_id -> TaskItem. Call once per operation
+        that needs multiple lookups to avoid repeated disk reads.
+        """
+        root = _tasks_root(self.team_name)
+        index: dict[str, TaskItem] = {}
+        for f in root.glob("task-*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                task = TaskItem.model_validate(data)
+                index[task.id] = task
+            except Exception:
+                continue
+        return index
