@@ -1,337 +1,235 @@
-# R2: OpenClaw 架構設計分析 — 工作流程與協作視角
+# R2: OpenClaw Plugin 生態系統分析 — 工作流程視角
 
 > **Researcher**: researcher-workflow
-> **Team**: poc-v2-phase1
+> **Team**: poc-v3-plugins-phase1
 > **Date**: 2026-03-26
-> **Core Question**: OpenClaw 嘅架構設計、多 Agent 協調機制、記憶系統（memory-lancedb-pro）
+> **Core Question**: OpenClaw 嘅 Plugin 生態系統發展現狀、分類、架構模式
 
 ---
 
 ## Executive Summary
 
-OpenClaw 係一個 **Gateway-centric 嘅 AI 助理平台**，核心設計理念係「一個長壽 daemon 管理所有通訊表面，每個 Agent 係一個完全隔離嘅大腦」。佢嘅架構同 ClawTeam（多 CLI 編排層）有根本性分別：OpenClaw 係一個自成一體嘅 agent runtime，而唔係一個協調層。
+OpenClaw 嘅 Plugin 生態系統正喺度 **爆發式成長**。從 GitHub 搜索結果嚟睇，已經有 **20+ 個獨立 plugin project**，涵蓋通訊渠道、安全中間件、記憶系統、MCP 適配器等多個類別。生態系統嘅核心驅動力係 OpenClaw 嘅 **pluggable architecture**——每個 plugin 可以註冊 capabilities（channel、provider、tool 等），令第三方開發者可以擴展平台功能。
 
 **三大核心發現：**
 
-1. **Gateway 係唯一嘅入口**：所有通訊表面（WhatsApp、Telegram、Discord 等）都經 Gateway 統一管理
-2. **多 Agent 係「路由隔離」唔係「協作編排」**：binding system 靈活但冇原生嘅 agent 間任務分配
-3. **memory-lancedb-pro 係 production-grade 記憶系統**：hybrid retrieval + smart extraction + Weibull decay lifecycle
+1. **通訊渠道 plugin 係最大類別**：WeCom、DingTalk、WeChat、Zalo 等中國/東南亞 IM 平台佔大多數
+2. **安全同穩定性 plugin 開始出現**：Shellward（8 層防禦）、Stability（anti-drift）代表咗生態嘅成熟度提升
+3. **Skills 生態遠大於 Plugin 生態**：awesome-openclaw-skills 有 42K stars 同 5,400+ skills，遠超 plugin 嘅規模
 
 ---
 
-## 1. 架構設計分析
+## 1. Plugin 分類與分析
 
-### 1.1 整體架構（5 層）
+### 1.1 通訊渠道 Plugin（Channel Plugins）
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Gateway Daemon                            │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Channel Layer                                       │   │
-│  │  WhatsApp │ Telegram │ Discord │ Signal │ iMessage  │   │
-│  └──────────────────────┬───────────────────────────────┘   │
-│                         │                                    │
-│  ┌──────────────────────▼───────────────────────────────┐   │
-│  │  Routing Layer (bindings)                             │   │
-│  │  peer → agentId │ guild → agentId │ channel → agentId│   │
-│  └──────────────────────┬───────────────────────────────┘   │
-│                         │                                    │
-│  ┌──────────────────────▼───────────────────────────────┐   │
-│  │  Agent Layer                                          │   │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐              │   │
-│  │  │ Agent A │  │ Agent B │  │ Agent C │              │   │
-│  │  │workspace│  │workspace│  │workspace│              │   │
-│  │  │sessions │  │sessions │  │sessions │              │   │
-│  │  │memory   │  │memory   │  │memory   │              │   │
-│  │  └─────────┘  └─────────┘  └─────────┘              │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Plugin Layer                                         │   │
-│  │  memory │ contextEngine │ channels │ providers       │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  WebSocket API ←── Clients (macOS/CLI/WebChat/Nodes)        │
-└──────────────────────────────────────────────────────────────┘
-```
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **sunnoy/openclaw-plugin-wecom** | 企業微信 AI 機器人，支援流式輸出、動態 Agent 管理、群聊集成 | 647 | 76 | 2026-03-26 |
+| **DingTalk-Real-AI/dingtalk-openclaw-connector** | 钉钉機器人/DEAP Agent 連接，支援 AI Card 流式響應 | 1,916 | 159 | 2026-03-26 |
+| **WecomTeam/wecom-openclaw-plugin** | 企業微信 channel plugin | - | - | 2026-03-26 |
+| **11haonb/wecom-openclaw-plugin** | WeCom channel plugin | - | - | 2026-03-16 |
+| **CzsGit/wechat-openclaw-plugin** | 微信通路插件（掃碼登錄 + AGP WebSocket + HTTP webhook） | - | - | 2026-03-16 |
+| **darkamenosa/openzalo** | Zalo Personal messaging（越南） | 31 | 6 | 2026-03-26 |
 
-**證據**：`docs/concepts/architecture.md` 明確定義 Gateway 係唯一管理所有 messaging surfaces 嘅 daemon。
+**工作流分析：**
+- 呢啲 plugin 通常實現咗 OpenClaw 嘅 **Channel capability**（`api.registerChannel(...)`）
+- 支援 **流式輸出**（streaming）係共同特色，令用戶體驗更自然
+- **群聊集成** 係複雜場景，需要處理 mention、reply、白名單等
 
-### 1.2 Agent 定義
+### 1.2 協議與互操作 Plugin
 
-一個 OpenClaw Agent 係一個 **fully scoped brain**，擁有：
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **win4r/openclaw-a2a-gateway** | A2A（Agent-to-Agent）協議 v0.3.0 實現，雙向 agent 通訊 | 337 | 59 | 2026-03-26 |
+| **androidStern-personal/openclaw-mcp-adapter** | 將 MCP server tools 暴露為 native agent tools | 33 | 12 | 2026-03-25 |
 
-| 組件 | 路徑 | 職責 |
-|------|------|------|
-| **Workspace** | `~/.openclaw/workspace` 或 `~/.openclaw/workspace-<agentId>` | AGENTS.md、SOUL.md、USER.md、記憶檔案 |
-| **Agent Dir** | `~/.openclaw/agents/<agentId>/agent` | auth profiles、model registry、per-agent config |
-| **Session Store** | `~/.openclaw/agents/<agentId>/sessions` | 對話歷史、routing state |
+**工作流分析：**
+- **A2A Gateway** 係最關鍵嘅互操作 plugin——令 OpenClaw 可以同其他 A2A-compliant agent 通訊
+- **MCP Adapter** 令 OpenClaw 可以使用任何 MCP server 提供嘅工具，擴展咗 tool 生態
+- 兩者都係 **跨系統協作** 嘅基礎設施
 
-**關鍵設計：** 每個 Agent 嘅 auth profiles 係 **per-agent**，唔會自動共享。呢個係安全隔離嘅基礎。
+### 1.3 安全與穩定性 Plugin
 
-### 1.3 Agent Loop（代理迴圈）
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **jnMetaCode/shellward** | AI Agent 安全中間件：8 層防禦、DLP 數據流、prompt injection 偵測 | 48 | 5 | 2026-03-24 |
+| **CoderofTheWest/openclaw-plugin-stability** | Agent 穩定性框架：Shannon entropy 監控、confabulation 偵測、loop guards | 8 | 4 | 2026-03-23 |
 
-OpenClaw 嘅 agent loop 係一個 **serialized run per session**：
+**工作流分析：**
+- **Shellward** 代表咗 **security middleware** 嘅模式——喺 agent 同外部世界之間加一層防禦
+- **Stability** 代表咗 **observability + guardrails** 嘅模式——監控 agent 行為，偵測 drift 同 confabulation
+- 兩者都係 **治理工作流** 嘅組件
 
-```
-Message 進入
-    ↓
-Session 解析（sessionKey）
-    ↓
-Queue 排隊（per-session lane + optional global lane）
-    ↓
-Context Assembly（context engine）
-    ├── System Prompt
-    ├── Relevant Memory（memory_search）
-    ├── Session History（compacted if needed）
-    └── Tool Definitions
-    ↓
-Model Inference
-    ↓
-Tool Execution（如有 tool call）
-    ↓
-Streaming Reply
-    ↓
-Persistence（session JSONL + memory write）
-```
+### 1.4 記憶與持續性 Plugin
 
-**證據**：`docs/concepts/agent-loop.md` 定義咗完整嘅 lifecycle：intake → context assembly → model inference → tool execution → streaming replies → persistence。
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **CoderofTheWest/openclaw-plugin-continuity** | Infinite Thread：持續、智能嘅 agent 記憶 | 13 | 4 | 2026-03-21 |
+
+**工作流分析：**
+- 同 memory-lancedb-pro 競爭，但定位唔同——continuity focus 喺 **thread continuity** 而唔係 **vector search**
+- 代表咗記憶系統嘅另一種設計哲學
+
+### 1.5 工具與搜索 Plugin
+
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **5p00kyy/openclaw-plugin-searxng** | SearXNG 網頁搜索：隱私保護嘅自託管搜索 | 9 | 3 | 2026-03-22 |
+
+### 1.6 其他 Plugin
+
+| Plugin | 功能 | Stars | Forks | 最近更新 |
+|--------|------|-------|-------|---------|
+| **13rac1/openclaw-plugin-claude-code** | 喺 Podman/Docker 容器中運行 Claude Code | 14 | 6 | 2026-03-23 |
+| **pepicrft/openclaw-plugin-vault** | HashiCorp Vault 整合 | - | - | 2026-02-10 |
+| **luckybugqqq/claw-sama** | VRM Avatar 桌面寵物 | - | - | 2026-03-26 |
+| **Skyzi000/openclaw-open-webui-channels** | Open WebUI Channels 連接 | - | - | 2026-03-26 |
+| **FLock-io/openclaw-plugin-flock** | FLock 去中心化 AI 訓練 | - | - | 2026-03-01 |
+| **redf0x1/camofox-browser** | 反偵測瀏覽器（AI agent 用） | - | - | 2026-03-26 |
 
 ---
 
-## 2. 多 Agent 協調機制
+## 2. 生態系統聚合項目
 
-### 2.1 Binding System（路由系統）
+### 2.1 Awesome Lists
 
-OpenClaw 嘅多 Agent 係 **路由隔離**，唔係 **協作編排**。
+| 項目 | Stars | Forks | 內容 |
+|------|-------|-------|------|
+| **VoltAgent/awesome-openclaw-skills** | **42,158** | 4,011 | 5,400+ skills，從官方 Skills Registry 篩選同分類 |
+| **ThisIsJeron/awesome-openclaw-plugins** | 8 | 9 | Plugin 精選列表 |
+| **composio-community/awesome-openclaw-plugins** | - | - | 另一個 plugin 精選列表 |
+| **hesamsheikh/awesome-openclaw-usecases** | - | - | 使用案例集合 |
 
-**路由規則（deterministic，most-specific wins）：**
+**關鍵洞察：** Skills 生態（42K stars）遠大於 Plugin 生態（<2K stars），代表 OpenClaw 嘅 **skill-first** 策略成功。
 
-| 優先級 | Match 類型 | 範例 |
-|--------|-----------|------|
-| 1 | `peer` | 特定 DM 或 group ID |
-| 2 | `parentPeer` | Thread 繼承 |
-| 3 | `guildId + roles` | Discord 角色路由 |
-| 4 | `guildId` | Discord guild |
-| 5 | `teamId` | Slack team |
-| 6 | `accountId` | Channel account |
-| 7 | channel-level | 整個 channel |
-| 8 | fallback | default agent |
+### 2.2 官方生態
 
-**證據**：`docs/concepts/multi-agent.md` 明確定義「Bindings are deterministic and most-specific wins」。
-
-### 2.2 DM Scope（直接訊息範圍控制）
-
-| Scope | 行為 | 適用場景 |
-|-------|------|---------|
-| `main`（default） | 所有 DM 共享一個 session | 單用戶 |
-| `per-peer` | 按 sender ID 隔離 | 多用戶 |
-| `per-channel-peer` | 按 channel + sender 隔離 | 推薦用於多用戶 inbox |
-| `per-account-channel-peer` | 按 account + channel + sender 隔離 | 多 account 場景 |
-
-**安全警告：** 如果 agent 可以接收多個人嘅 DM，預設嘅 `main` scope 會導致 Alice 嘅私人資訊洩漏俾 Bob。
-
-### 2.3 Agent 間通訊
-
-OpenClaw 支援 agent 之間嘅 direct messaging，但 **預設關閉**：
-
-```json5
-{
-  tools: {
-    agentToAgent: {
-      enabled: false,       // 預設關閉
-      allow: ["home", "work"]  // 白名單
-    }
-  }
-}
-```
-
-### 2.4 同 ClawTeam 嘅根本分別
-
-| 維度 | OpenClaw | ClawTeam |
-|------|----------|---------|
-| **Agent 關係** | 路由隔離（唔同人用唔同 agent） | 協作編排（agent 之間合作） |
-| **通訊方式** | Channel → Gateway → Agent | Agent → Inbox File → Agent |
-| **任務分配** | 冇原生支援 | Task + blocked_by + auto-unlock |
-| **狀態管理** | Session JSONL | Task JSON + Inbox JSON |
-| **執行模式** | 內建 agent loop | 外部 CLI process（tmux） |
-
----
-
-## 3. 記憶系統（memory-lancedb-pro）
-
-### 3.1 兩層記憶架構
-
-```
-Layer 1: Markdown Files（人類可讀，source of truth）
-  ├── MEMORY.md              ← 長期記憶（curated）
-  └── memory/YYYY-MM-DD.md   ← 每日日誌（append-only）
-
-Layer 2: Vector Database（機器可搜索）
-  ├── LanceDB Table          ← 向量索引（ANN，cosine distance）
-  ├── BM25 FTS Index         ← 全文搜索
-  └── Hybrid Fusion          ← Vector + BM25 融合
-```
-
-**證據**：`docs/concepts/memory.md` 明確定義「OpenClaw memory is plain Markdown in the agent workspace. The files are the source of truth」。
-
-### 3.2 memory-lancedb-pro 核心功能
-
-#### Hybrid Retrieval（混合檢索）
-
-```
-Query → embedQuery() ─┐
-                       ├─→ RRF Fusion → Rerank → Lifecycle Decay → Length Norm → Filter → MMR
-Query → BM25 FTS ─────┘
-```
-
-**多階段評分管線：**
-
-| 階段 | 效果 |
+| 項目 | 功能 |
 |------|------|
-| **RRF Fusion** | 結合語意同精確匹配嘅 recall |
-| **Cross-Encoder Rerank** | 提升語意精確度（60% cross-encoder + 40% original） |
-| **Lifecycle Decay Boost** | Weibull freshness + access frequency + importance × confidence |
-| **Length Normalization** | 防止長條目主導（anchor: 500 chars） |
-| **Hard Min Score** | 移除不相關結果（default: 0.35） |
-| **MMR Diversity** | cosine similarity > 0.85 → demoted |
-
-#### Smart Extraction（智能提取，v1.1.0）
-
-**6 類記憶類別：**
-
-| 類別 | 描述 | 合併策略 |
-|------|------|---------|
-| **profile** | 用戶檔案 | always merge |
-| **preferences** | 偏好設定 | merge |
-| **entities** | 實體資訊 | merge |
-| **events** | 事件記錄 | append-only |
-| **cases** | 案例經驗 | append-only |
-| **patterns** | 行為模式 | merge |
-
-**L0/L1/L2 分層儲存：**
-- **L0**：一句話索引（one-sentence index）
-- **L1**：結構化摘要（structured summary）
-- **L2**：完整敘述（full narrative）
-
-**兩階段去重：**
-1. Vector similarity pre-filter（≥0.7）
-2. LLM semantic decision（CREATE/MERGE/SKIP）
-
-#### Memory Lifecycle（記憶生命週期，v1.1.0）
-
-**Weibull Decay Engine：**
-```
-composite_score = recency + frequency + intrinsic_value
-```
-
-**三層晉降級：**
-```
-Peripheral ⟷ Working ⟷ Core
-```
-
-- 重要嘅記憶 decay 得慢（importance-modulated half-life）
-- 常用嘅記憶會晉升到 Core tier
-- 唔常用嘅記憶會降級到 Peripheral tier
-
-### 3.3 Auto-Capture 同 Auto-Recall
-
-| Hook | 觸發點 | 功能 |
-|------|--------|------|
-| **Auto-Capture** | `agent_end` | 從對話提取 preference/fact/decision/entity，deduplicate，每 turn 最多 3 條 |
-| **Auto-Recall** | `before_agent_start` | 注入 `<relevant-memories>` context（最多 3 條） |
-
-### 3.4 Noise Filtering（噪音過濾）
-
-**過濾內容：** agent refusals、meta-questions、greetings、low-quality content
-
-**Adaptive Retrieval（自適應檢索）：**
-- 跳過檢索：greetings、slash commands、simple confirmations、emoji
-- 強制檢索：memory keywords（"remember"、"previously"、"last time"）
-- CJK-aware：中文 6 字 vs 英文 15 字 threshold
+| **openclaw/clawhub** | 官方 Skills Registry（clawhub.com） |
 
 ---
 
-## 4. Context Engine（上下文引擎）
+## 3. Plugin 架構模式
 
-### 4.1 Pluggable Architecture
+### 3.1 Capability Model（能力模型）
 
-OpenClaw 嘅 context engine 係 **pluggable** 架構：
+OpenClaw plugin 可以註冊以下 capabilities：
 
-| Engine | 類型 | 特色 |
-|--------|------|------|
-| **legacy** | Built-in | 預設嘅 context 組裝邏輯 |
-| **Plugin engine** | Third-party | 可替換 context 組裝策略 |
+| Capability | Registration Method | 範例 |
+|------------|-------------------|------|
+| **Text Inference** | `api.registerProvider(...)` | openai, anthropic |
+| **Speech** | `api.registerSpeechProvider(...)` | elevenlabs |
+| **Media Understanding** | `api.registerMediaUnderstandingProvider(...)` | openai, google |
+| **Image Generation** | `api.registerImageGenerationProvider(...)` | openai, google |
+| **Web Search** | `api.registerWebSearchProvider(...)` | google |
+| **Channel / Messaging** | `api.registerChannel(...)` | wecom, dingtalk |
 
-### 4.2 Lifecycle Hooks
+### 3.2 Plugin Shapes（形狀分類）
 
-| Hook | 觸發點 | 功能 |
-|------|--------|------|
-| **Ingest** | 新訊息加入 session | 儲存或索引訊息 |
-| **Assemble** | 每次 model run 前 | 組裝 context（決定包含邊啲訊息） |
-| **Compact** | context window 滿咗 | 摘要舊歷史，釋放空間 |
-| **After turn** | run 完成後 | 持久化狀態、觸發背景 compaction |
+| Shape | 描述 | 範例 |
+|-------|------|------|
+| **plain-capability** | 註冊一種 capability | mistral（provider only） |
+| **hybrid-capability** | 註冊多種 capabilities | openai（text + speech + media + image） |
+| **hook-only** | 只註冊 hooks，冇 capabilities | 舊式 plugin |
+| **non-capability** | 註冊 tools/commands/services/routes，冇 capabilities | 大部分社區 plugin |
+
+### 3.3 Plugin Manifest
+
+每個 plugin 必須有 `openclaw.plugin.json`：
+- Plugin 身份（name、version、description）
+- Config schema（JSON Schema，用於驗證）
+- Auth metadata
+- UI hints
 
 ---
 
-## 5. 自動化系統
+## 4. 工作流數據流分析
 
-### 5.1 Heartbeat vs Cron
-
-| 維度 | Heartbeat | Cron |
-|------|-----------|------|
-| **觸發** | 固定間隔（default 30m） | cron 表達式 |
-| **執行環境** | Main session（完整 context） | Isolated session（冇 context） |
-| **用途** | 主動發現需要關注嘅事 | 定時執行特定任務 |
-| **適合** | 監控、狀態檢查 | 定時報告、備份 |
-
-### 5.2 Session Compaction
+### 4.1 Channel Plugin 數據流
 
 ```
-Session token 接近 context window 上限
+外部 IM 平台（WeCom/DingTalk/WeChat）
     ↓
-Memory Flush（提醒 agent 寫入長期記憶）
+Channel Plugin（接收訊息）
     ↓
-Compaction（摘要舊訊息，保留最近對話）
+OpenClaw Gateway（路由）
+    ↓
+Agent（處理）
+    ↓
+Channel Plugin（發送回覆）
+    ↓
+外部 IM 平台
+```
+
+### 4.2 A2A Gateway 數據流
+
+```
+OpenClaw Agent A
+    ↓
+A2A Gateway Plugin（編碼為 A2A 協議）
+    ↓
+網絡傳輸
+    ↓
+外部 Agent（A2A-compliant）
+    ↓
+A2A Gateway Plugin（解碼回 OpenClaw 格式）
+    ↓
+OpenClaw Agent A
+```
+
+### 3.3 MCP Adapter 數據流
+
+```
+OpenClaw Agent
+    ↓
+MCP Adapter Plugin（攔截 tool call）
+    ↓
+MCP Server（執行工具）
+    ↓
+MCP Adapter Plugin（返回結果）
+    ↓
+OpenClaw Agent
 ```
 
 ---
 
-## 6. 來源可信度評估
+## 5. 來源可信度評估
 
 | 來源 | 類型 | 可信度 | 備註 |
 |------|------|--------|------|
-| OpenClaw 官方文檔 | Primary source | **High** | 直接來自項目文檔 |
-| memory-lancedb-pro README | Primary source | **High** | 插件作者嘅官方文檔 |
-| memory-lancedb-pro source code | Primary source | **High** | 實際實現 |
-| ClawTeam source code | Primary source | **High** | 用於對比分析 |
+| GitHub repo metadata | Primary source | **High** | 直接來自項目 |
+| OpenClaw docs/plugins/ | 官方文檔 | **High** | Plugin 架構權威來源 |
+| gh search repos | GitHub API | **High** | 即時數據 |
+| awesome-openclaw-skills | 社區聚合 | **Medium** | 可能有 bias |
 
 ---
 
-## 7. 研究限制
+## 6. 研究限制
 
-1. **冇深入測試 memory-lancedb-pro 嘅實際性能**：報告基於文檔同 source code，冇跑 benchmark
-2. **冇分析 multi-agent 嘅實際協作場景**：OpenClaw 嘅多 Agent 主要係隔離唔係協作，實際協作案例有限
-3. **冇比較其他記憶系統嘅實際效果**：Mem0、MemGPT 等系統嘅比較基於公開數據，冇喺同一環境下測試
-4. **Context Engine plugin 生態未成熟**：目前主要用 legacy engine，第三方 plugin 資訊有限
+1. **冇深入閱讀每個 plugin 嘅 source code**：分析基於 README 同 metadata
+2. **冇測試 plugin 嘅實際功能**：基於文檔分析
+3. **Stars 同 forks 可能有偏差**：新項目可能 stars 少但質量高
+4. **冇覆蓋所有 plugin**：GitHub 搜索可能有遺漏
 
 ---
 
-## 8. 關鍵發現摘要
+## 7. 關鍵發現摘要
 
 | # | 發現 | 證據來源 |
 |---|------|---------|
-| 1 | Gateway 係唯一入口，管理所有 channel | architecture.md |
-| 2 | Agent 係 fully scoped brain（workspace + sessions + auth） | multi-agent.md |
-| 3 | 多 Agent 係路由隔離唔係協作編排 | multi-agent.md binding rules |
-| 4 | DM scope 預設 `main`，多用戶有安全風險 | session.md security warning |
-| 5 | 記憶 source of truth 係 Markdown files | memory.md |
-| 6 | memory-lancedb-pro 提供 hybrid retrieval（Vector + BM25） | README.md |
-| 7 | Smart extraction 分 6 類，L0/L1/L2 分層儲存 | README.md v1.1.0 |
-| 8 | Weibull decay + 三層晉降級管理記憶生命週期 | README.md v1.1.0 |
-| 9 | Agent loop 係 serialized run per session | agent-loop.md |
-| 10 | Context engine 係 pluggable architecture | context-engine.md |
+| 1 | 通訊渠道 plugin 係最大類別（WeCom、DingTalk、WeChat） | gh search repos |
+| 2 | DingTalk connector 最受歡迎（1,916 stars） | GitHub metadata |
+| 3 | A2A Gateway 係最關鍵嘅互操作 plugin（337 stars） | GitHub metadata |
+| 4 | 安全 plugin 開始出現（Shellward、Stability） | gh search repos |
+| 5 | Skills 生態遠大於 Plugin 生態（42K vs <2K stars） | GitHub metadata |
+| 6 | Plugin 有 4 種 shape：plain/hybrid/hook-only/non-capability | architecture.md |
+| 7 | Channel plugin 實現 `api.registerChannel(...)` | architecture.md |
+| 8 | Plugin manifest 必須有 `openclaw.plugin.json` | manifest.md |
+| 9 | 中國/東南亞 IM 平台係主要嘅 channel plugin 來源 | gh search repos |
+| 10 | 社區正在構建 security middleware 模式（Shellward） | GitHub metadata |
 
 ---
 
-_Report saved: 2026-03-26 by researcher-workflow (poc-v2-phase1)_
+_Report saved: 2026-03-26 by researcher-workflow (poc-v3-plugins-phase1)_
