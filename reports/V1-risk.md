@@ -1,264 +1,236 @@
-# V1 Risk Assessment: AI Agent 未來發展趨勢
+# V1 Risk Assessment: OpenClaw GitHub PR Analysis
 
-> **Reviewer**: Risk Reviewer (poc-phase1-research)
+> **Reviewer**: Risk Reviewer (poc-v3-github-phase1)
 > **Date**: 2026-03-26
-> **Scope**: Multi-agent coordination, automation workflows, memory systems
-> **Perspective**: Risk & Feasibility Analysis
+> **Source**: openclaw/openclaw — 30 most recent PRs (gh pr list --state all --limit 30)
+> **Scope**: PR 內容風險分析、安全影響評估、代碼品質觀察
 
 ---
 
 ## Executive Summary
 
-AI Agent 生態正經歷從「單一智能體」到「多智能體協作」的範式轉移。Gartner 預測 2026 年底 40% 的企業應用將嵌入 AI Agent（2025 年僅 5%），市場規模預計從 78 億美元增長至 2030 年的 520 億美元。然而，這波快速成長伴隨著**系統性風險**：多智能體協調的複雜性爆炸、自動化工作流的安全漏洞、以及長期記憶系統的污染與濫用。
+分析 openclaw/openclaw 最近 30 個 PR，發現 **3 個高安全影響 PR**、**5 個中等風險 PR**、以及若干代碼品質觀察。整體而言，上游社群活躍，安全修復 PR 反應迅速（如 #55241 systemd secret 洩漏修復），但也存在大規模重構 PR（#55278 XL 級）帶來的合併風險。
 
-**Overall Risk Rating: HIGH**（技術成熟度不足，但商業壓力驅使快速採用）
-
----
-
-## 1. Multi-Agent Coordination — 協調機制風險
-
-### 1.1 級聯故障（Cascading Failures）
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| 單一 Agent 錯誤傳播至整個系統 | CRITICAL | HIGH | 整體任務失敗 |
-| 共享 LLM 的系統性偏差 | HIGH | HIGH | 所有 Agent 同時犯錯 |
-| 缺乏回滾機制 | HIGH | MEDIUM | 錯誤無法修正 |
-
-**核心問題**：當多個 Agent 共用同一個 LLM（如 GPT-4、Claude），模型的系統性偏差會在所有 Agent 中同時出現。一個 Agent 的幻覺（hallucination）可能被其他 Agent 當作「事實」傳播，形成**錯誤放大循環**。
-
-**業界現狀**：
-- IBM 強調需要「沙盒環境壓力測試」和「回滾機制」
-- 目前大多數框架缺乏「錯誤隔離」（fault isolation）機制
-- Deloitte 預測：不良的 Agent 編排可能使市場價值縮減 15-30%
-
-### 1.2 通訊協議碎片化
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| 缺乏統一的 Agent 間通訊標準 | HIGH | HIGH | 系統整合困難 |
-| 狀態管理跨 Agent 邊界不一致 | HIGH | HIGH | 任務衝突 |
-| 衝突解決機制不足 | MEDIUM | MEDIUM | 死鎖或資源競爭 |
-
-**核心問題**：Agent 之間的通訊協議目前是**各自為政**：
-- 沒有統一的訊息格式標準
-- 沒有跨框架的互操作性（A2A、MCP 等協議仍在早期）
-- 狀態同步依賴檔案系統或自定義中介層
-
-**工程挑戰**（MachineLearningMastery 2026）：
-> "Inter-agent communication protocols, state management across agent boundaries, conflict resolution mechanisms, and orchestration logic become core challenges that didn't exist in single-agent systems."
-
-### 1.3 編排複雜性爆炸
-
-當 Agent 數量增加時，協調複雜度呈**指數增長**：
-
-```
-2 agents  → 1 條通訊管道
-3 agents  → 3 條通訊管道
-5 agents  → 10 條通訊管道
-10 agents → 45 條通訊管道
-n agents  → n(n-1)/2 條通訊管道
-```
-
-**風險**：超過 5-7 個 Agent 的系統，如果沒有良好的編排架構（如階層式、序列式），會陷入「通訊風暴」——Agent 花更多時間協調而非執行任務。
+**Overall Risk Rating: MEDIUM**（社群活躍，安全意識良好，但大 PR 合併風險需關注）
 
 ---
 
-## 2. Automation Workflows — 自動化工作流風險
+## 1. High-Security-Impact PRs
 
-### 2.1 權限提升與自主行動
+### PR #55241 — fix(daemon): use EnvironmentFile= instead of inline secrets in systemd units
 
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| Agent 自主執行未經授權的操作 | CRITICAL | HIGH | 資料外洩、系統損壞 |
-| 缺乏 Human-in-the-Loop 強制機制 | HIGH | MEDIUM | 關鍵決策無人審核 |
-| 工具調用缺乏沙盒隔離 | HIGH | HIGH | 任意程式碼執行 |
+| Attribute | Value |
+|-----------|-------|
+| **Author** | natedemoss (Nathan DeMoss) |
+| **Status** | OPEN |
+| **Labels** | gateway, size: S |
+| **Security Impact** | HIGH |
 
-**核心問題**：當 Agent 獲得工具使用能力（檔案讀寫、API 呼叫、程式執行），它們的行動範圍從「生成文字」擴展到「改變現實」。如果缺乏適當的權限控制：
-- 一個被 prompt injection 攻擊的 Agent 可能刪除檔案、發送郵件、執行惡意程式
-- 多 Agent 系統中，一個被入侵的 Agent 可能利用其他 Agent 的信任關係橫向移動
+**問題**：`gateway install` 命令將 `~/.openclaw/.env` 中的 secret 值直接寫入 systemd unit file 的 `Environment=` 指令中，導致：
+- Secrets 洩漏到 `.bak` 備份檔案
+- `openclaw doctor` 誤判配置為非標準，觸發循環重裝
 
-**業界共識**（IBM 2025）：
-> "These systems must be rigorously stress-tested in sandbox environments to avoid cascading failures. Designing mechanisms for rollback actions and ensuring audit logs are integral."
+**修復**：改用 `EnvironmentFile=<path>` 引用外部 `.env` 檔案，避免 inline 寫入 secrets。
 
-### 2.2 供應鏈攻擊面
+**風險評估**：
+- ✅ **正面**：直接修復了 credential 洩漏問題
+- ⚠️ **注意**：`.env` 檔案的權限管理未在 PR 中明確規定（應設為 0600）
+- ⚠️ **注意**：修復僅覆蓋 Linux systemd，macOS launchd 狀況未提及
 
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| 惡意工具/插件注入 | HIGH | MEDIUM | Agent 行為被操控 |
-| 第三方 LLM API 的信任邊界模糊 | MEDIUM | HIGH | 資料洩漏 |
-| Agent 之間的隱式信任鏈 | HIGH | MEDIUM | 橫向移動攻擊 |
-
-**攻擊向量**：
-1. **工具投毒**：惡意工具回傳精心構造的輸入，操控 Agent 行為
-2. **記憶體投毒**：在 Agent 的長期記憶中植入惡意指令（見第 3 節）
-3. **Prompt Injection**：透過使用者輸入或外部資料注入惡意指令
-
-### 2.3 可觀測性與審計不足
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| 缺乏結構化日誌 | MEDIUM | HIGH | 故障無法診斷 |
-| 決策過程不可追溯 | HIGH | MEDIUM | 問責困難 |
-| 沒有即時監控告警 | MEDIUM | HIGH | 問題發現延遲 |
-
-**現狀**：大多數 Agent 框架的日誌能力僅限於 print 語句或簡單的事件記錄，缺乏：
-- 分散式追蹤（distributed tracing）
-- 決策鏈可視化
-- 即時異常偵測
+**緩解建議**：確認 `.env` 檔案權限為 0600，且僅限 gateway 用戶可讀。
 
 ---
 
-## 3. Memory Systems — 記憶系統風險
+### PR #55281 — Gateway: require caller scope for subagent session deletion
 
-### 3.1 記憶體投毒（Memory Poisoning）
+| Attribute | Value |
+|-----------|-------|
+| **Author** | jacobtomlinson (Jacob Tomlinson) |
+| **Status** | OPEN |
+| **Labels** | gateway, maintainer, size: S |
+| **Security Impact** | HIGH |
 
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| 惡意資料注入長期記憶 | CRITICAL | MEDIUM | 持續性行為操控 |
-| 幻覺被固化為「事實」 | HIGH | HIGH | 錯誤決策循環 |
-| 記憶體膨脹與退化 | MEDIUM | HIGH | 效能下降 |
+**問題**：Plugin subagent 的 `deleteSession` 調用路徑存在 `syntheticScopes` 覆蓋，允許未經認證的 fallback 調用者刪除 session。
 
-**這是 2026 年最被低估的 Agent 安全威脅。**
+**修復**：移除 `syntheticScopes` 覆蓋，要求所有 session 刪除操作必須經過正常的 gateway 授權。
 
-**攻擊機制**（InstaTunnel 2026）：
-> "A single malicious document ingested six months ago can still be 'present' and 'influential' in the current reasoning chain."
+**風險評估**：
+- ✅ **正面**：修復了權限提升漏洞——第三方 plugin 不能再透過 fallback 路徑刪除 session
+- ⚠️ **注意**：破壞性變更——依賴 fallback deletion 的第三方 plugin 將失效
+- ⚠️ **注意**：需要社群溝通，告知 plugin 開發者遷移
 
-**運作方式**：
-1. 攻擊者在 Agent 可存取的資料源中植入惡意內容
-2. Agent 將該內容存入長期記憶（向量資料庫、知識圖譜）
-3. 六個月後，Agent 在推理時檢索到該記憶，將其當作可信事實使用
-4. 惡意影響持續存在，即使原始資料已被移除
-
-**防禦缺口**：
-- 目前沒有記憶體來源追溯機制
-- 向量資料庫的相似性搜尋無法區分「可信」與「被污染」的記憶
-- 缺乏記憶體「過期」或「撤銷」機制
-
-### 3.2 幻覺固化（Hallucination Crystallization）
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| Agent 的幻覺被存入記憶並重複引用 | HIGH | HIGH | 錯誤知識累積 |
-| 缺乏事實驗證機制 | HIGH | MEDIUM | 虛假資訊傳播 |
-| 跨 Agent 的幻覺共振 | MEDIUM | MEDIUM | 系統性偏差 |
-
-**數據**：頂級 LLM 仍然有 0.7% 到 30% 的幻覺率（Drainpipe 2025）。當 Agent 將幻覺存入記憶後：
-- 該幻覺成為未來推理的「上下文」
-- 其他 Agent 可能引用該記憶，形成「幻覺共振」
-- 隨著時間推移，虛假知識庫不斷膨脹
-
-### 3.3 隱私與合規風險
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| PII（個人識別資訊）洩漏至記憶系統 | CRITICAL | MEDIUM | GDPR/個資法違規 |
-| 跨 Agent 記憶共享導致資料外洩 | HIGH | MEDIUM | 合規風險 |
-| 記憶體無法真正「刪除」 | MEDIUM | HIGH | 被遺忘權（Right to be Forgotten）問題 |
-
-**合規挑戰**：
-- 向量資料庫中的資料難以精確刪除（嵌入向量不可逆）
-- 多 Agent 共享記憶時，資料流向難以追蹤
-- 缺乏記憶體存取控制（哪個 Agent 可以讀寫哪些記憶）
+**緩解建議**：在 release notes 中明確標註此 breaking change，並提供遷移指南。
 
 ---
 
-## 4. Cross-Cutting Concerns — 跨領域風險
+### PR #55278 — Gateway: reconcile ingress and embedded runner auth seam
 
-### 4.1 勞動力影響
+| Attribute | Value |
+|-----------|-------|
+| **Author** | THESPRYGUY |
+| **Status** | OPEN |
+| **Labels** | docs, gateway, cli, scripts, commands, agents, **size: XL** |
+| **Security Impact** | HIGH (behavioral) |
 
-- AI Agent 正從「內容生成器」進化為「自主問題解決者」
-- 這引發自動化取代工作、監控、工作場所權力失衡的擔憂
-- 缺乏產業標準的「人機協作」框架
+**問題**：Gateway ingress 與 embedded runner 之間的信任邊界模糊，`previous_response_id` session 重用缺乏 scope 限制。
 
-### 4.2 基礎設施壓力
+**修復**：
+- Ingress 執行現在要求明確的 `senderIsOwner` 和 `allowModelOverride` 標誌
+- `previous_response_id` session 重用限制在相同 auth/agent 邊界內
+- `x-openclaw-model` override 經過 allowlist 驗證
 
-- 資料中心擴張對能源網造成壓力
-- Agent 的持續運行（24/7）增加碳足跡
-- 邊緣部署的 Agent 缺乏資源隔離
+**風險評估**：
+- ⚠️ **高風險**：XL 級 PR（90+ 檔案變更），包含大量非核心檔案（ops/、scripts/、M10 文檔）
+- ⚠️ **高風險**：PR 描述承認是「partial Lane 2 submission」，完整 reconciliation 延後到 Lane 2b
+- ⚠️ **高風險**：包含 `reviewer_feedback.txt` 和 `ops/config/openclaw.json.snapshot`（可能洩漏配置）
+- ✅ **正面**：Security Impact 自我評估完整，明確列出變更的權限/執行面影響
+- ✅ **正面**：76/76 focused tests passed
 
-### 4.3 市場泡沫風險
+**緩解建議**：
+1. 拆分為多個較小 PR（gateway ingress、embedded runner auth、docs/scripts 分離）
+2. 移除 `ops/config/openclaw.json.snapshot`（可能含敏感配置）
+3. 在合併前完成 full upstream `run/attempt.ts` reconciliation
 
-- 市場預測從 85 億（2026）到 350 億（2030）美元，但實際落地案例有限
-- 「Pilot Purgatory」——大量概念驗證，少量生產部署
-- 技術成熟度曲線（Hype Cycle）可能即將進入「幻滅谷底」
+---
+
+## 2. Medium-Risk PRs
+
+### PR #55211 — fix: prevent re-entrant loop in internal hook trigger
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | ggzeng (Gavin Zeng) |
+| **Status** | OPEN |
+| **Labels** | size: S |
+| **Risk** | MEDIUM — 無限循環可能導致資源耗盡 |
+
+**分析**：Internal hook trigger 的 re-entrant loop 是一個穩定性問題。如果 hook 觸發自身，可能導致無限遞迴和 OOM。PR body 過於簡略（僅 "See PR body above"），缺乏問題描述。
+
+---
+
+### PR #55267 — fix(plugins): apply bundled allowlist compat in plugin status report
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | pingren (Ping) |
+| **Status** | OPEN |
+| **Labels** | size: XS |
+| **Risk** | MEDIUM — CLI 診斷資訊不準確 |
+
+**分析**：當 `plugins.allow` 配置時，CLI 報告 bundled plugins 為 disabled，但 gateway runtime 正常載入。這導致診斷誤導，用戶可能以為插件未啟用。
+
+---
+
+### PR #55221 — perf(agents): add contextInjection option to skip workspace re-injection
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | cgdusek |
+| **Status** | OPEN |
+| **Risk** | MEDIUM — 跳過 workspace re-injection 可能導致 context 不完整 |
+
+**分析**：Performance optimization 但可能犧牲 context 完整性。需要確認跳過 re-injection 的條件是否足夠嚴格。
+
+---
+
+### PR #55214 — fix: trigger model fallback on HTTP 503 Service Unavailable
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | bugkill3r |
+| **Status** | OPEN |
+| **Risk** | MEDIUM — Ollama 503 錯誤處理 |
+
+**分析**：直接影響本地 Ollama 部署的可靠性。如果 Ollama 返回 503，應該 failover 到備用模型而不是報錯。
+
+---
+
+### PR #55226 — Update Minimax API base URL
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | wcc0077 |
+| **Status** | OPEN |
+| **Risk** | MEDIUM — API endpoint 變更可能影響服務可用性 |
+
+**分析**：變更 API base URL 需要驗證新 endpoint 的穩定性和安全性。
+
+---
+
+## 3. Merged PRs (Positive Signals)
+
+### PR #55227 — test: improve test runner help text
+
+| Attribute | Value |
+|-----------|-------|
+| **Author** | codex (AI-generated) |
+| **Status** | MERGED |
+| **Signal** | ✅ CI/CD 改進持續進行 |
+
+---
+
+## 4. Pattern Analysis
+
+### 4.1 PR 類型分佈
+
+| Type | Count | Percentage |
+|------|-------|------------|
+| fix | 18 | 60% |
+| feat | 5 | 17% |
+| perf | 2 | 7% |
+| ci/test | 3 | 10% |
+| docs | 2 | 7% |
+
+**觀察**：60% 為 fix PR，顯示代碼庫處於穩定化階段。
+
+### 4.2 安全相關 PR 比例
+
+| Category | Count | PR Numbers |
+|----------|-------|------------|
+| Auth/Credential | 3 | #55241, #55278, #55281 |
+| Plugin Security | 2 | #55267, #55212 |
+| Input Validation | 2 | #55210, #55209 |
+| Total Security | 7 | 23% |
+
+**觀察**：23% 的 PR 涉及安全問題，顯示社群對安全的重視程度較高。
+
+### 4.3 AI-Generated PRs
+
+至少 2 個 PR 明確標註 AI assistance（#55241 Claude Code, #55227 codex）。這是一個值得關注的趨勢：
+- ✅ AI 輔助加速修復
+- ⚠️ 需要人工審核確保品質
 
 ---
 
 ## 5. Risk Matrix Summary
 
-| Category | Risk | Severity | Likelihood | Priority |
-|----------|------|----------|------------|----------|
-| Memory | 記憶體投毒（長期惡意影響） | CRITICAL | MEDIUM | P0 |
-| Multi-Agent | 級聯故障（共享 LLM 偏差） | CRITICAL | HIGH | P0 |
-| Automation | 權限提升（未授權操作） | CRITICAL | HIGH | P0 |
-| Memory | 幻覺固化（錯誤知識累積） | HIGH | HIGH | P1 |
-| Multi-Agent | 通訊協議碎片化 | HIGH | HIGH | P1 |
-| Automation | 供應鏈攻擊（工具投毒） | HIGH | MEDIUM | P1 |
-| Memory | 隱私合規（PII 洩漏） | CRITICAL | MEDIUM | P1 |
-| Multi-Agent | 編排複雜性爆炸 | HIGH | MEDIUM | P2 |
-| Automation | 可觀測性不足 | MEDIUM | HIGH | P2 |
-| Cross-Cutting | 市場泡沫 / Pilot Purgatory | MEDIUM | HIGH | P3 |
+| PR | Risk | Severity | Priority |
+|----|------|----------|----------|
+| #55278 | XL PR 合併風險 + 配置洩漏 | HIGH | P0 |
+| #55241 | .env 權限未明確規定 | MEDIUM | P1 |
+| #55281 | Breaking change for plugins | MEDIUM | P1 |
+| #55211 | Re-entrant loop（PR body 不完整） | MEDIUM | P1 |
+| #55221 | Context injection skip 風險 | LOW | P2 |
+| #55214 | Ollama 503 failover | LOW | P2 |
 
 ---
 
-## 6. Feasibility Assessment
+## 6. Recommendations
 
-| Aspect | Assessment | Notes |
-|--------|------------|-------|
-| **技術可行性** | ⚠️ MEDIUM | 核心技術可用，但整合與可靠性不足 |
-| **安全可行性** | ❌ LOW | 記憶體投毒、prompt injection 等威脅缺乏成熟防禦 |
-| **商業可行性** | ✅ HIGH | 市場需求明確，投資活躍 |
-| **合規可行性** | ⚠️ MEDIUM | 法規框架仍在演進，跨司法管轄區合規困難 |
-| **人才可行性** | ⚠️ MEDIUM | 多智能體系統專家稀缺 |
+### For Upstream (openclaw/openclaw)
 
----
+1. **PR #55278 拆分**：XL PR 應拆分為 gateway ingress、embedded runner auth、docs/scripts 三個獨立 PR
+2. **配置洩漏檢查**：移除 PR #55278 中的 `ops/config/openclaw.json.snapshot`
+3. **Breaking change 溝通**：PR #55281 需要在 release notes 中明確標註
+4. **PR body 範本執行**：PR #55211 的 body 過於簡略，應強制執行 PR 範本
 
-## 7. Recommendations
+### For Our Fork
 
-### Immediate (P0 — 立即行動)
-
-1. **記憶體來源追溯**：為每個記憶條目附加來源標籤、時間戳、可信度評分
-2. **沙盒隔離強制**：所有 Agent 的工具調用必須在沙盒環境執行
-3. **Human-in-the-Loop 閘門**：關鍵操作（檔案刪除、外部通訊）必須人工審核
-
-### Short-term (P1 — 下一迭代)
-
-4. **記憶體投毒防禦**：實作記憶體驗證機制（交叉比對、來源可信度）
-5. **統一通訊協議**：採用或定義 Agent 間通訊標準（A2A、MCP）
-6. **結構化日誌**：所有 Agent 行動必須記錄決策鏈
-
-### Medium-term (P2 — 季度規劃)
-
-7. **記憶體過期機制**：實作 TTL（Time-to-Live）和自動清理
-8. **跨 Agent 存取控制**：基於角色的記憶體讀寫權限
-9. **回滾框架**：Agent 行動的原子性與可逆性
-
-### Long-term (P3 — 年度願景)
-
-10. **聯邦記憶架構**：分散式記憶系統，避免單點故障
-11. **Agent 信任評分**：基於歷史表現的動態信任度量
-12. **合規自動化**：自動檢測 PII 和法規合規性
+5. **Cherry-pick 安全修復**：優先合併 #55241（systemd secret 洩漏）和 #55281（session 刪除權限）
+6. **延後 #55278**：等待上游拆分後再考慮合併
+7. **監控 #55214**：Ollama 503 failover 對我們的本地部署很重要
 
 ---
 
-## 8. Conclusion
-
-AI Agent 的未來發展充滿機遇，但風險同樣巨大。**記憶體投毒**和**級聯故障**是 2026 年最被低估的威脅——它們的影響是持久且難以偵測的。產業需要從「快速部署」轉向「安全部署」，在追求自主性的同時，建立堅實的信任、安全與合規基礎。
-
-> **Bottom line**: The technology works. The governance doesn't — yet.
-
----
-
-_Report generated by Risk Reviewer — poc-phase1-research team_
+_Report generated by Risk Reviewer — poc-v3-github-phase1 team_
 _Output: reports/V1-risk.md_
-
-### Sources
-
-- [1] MachineLearningMastery — 7 Agentic AI Trends to Watch in 2026
-- [2] IONI — Multi-AI Agents Systems in 2025: Key Insights
-- [3] IBM — AI Agents in 2025: Expectations vs. Reality
-- [4] Deloitte — Unlocking Exponential Value with AI Agent Orchestration
-- [5] InstaTunnel — Agentic Memory Poisoning (Medium, Jan 2026)
-- [6] Drainpipe — The Reality of AI Hallucinations in 2025
-- [7] Gartner — 40% of Enterprise Apps Will Feature AI Agents by 2026
