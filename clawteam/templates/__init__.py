@@ -32,12 +32,13 @@ class TaskDef(BaseModel):
     subject: str
     description: str = ""
     owner: str = ""
+    blocked_by: list[str] = []
 
 
 class TemplateDef(BaseModel):
     name: str
     description: str = ""
-    command: list[str] = ["claude"]
+    command: list[str] = ["openclaw"]
     backend: str = "tmux"
     leader: AgentDef
     agents: list[AgentDef] = []
@@ -92,7 +93,7 @@ def _parse_toml(path: Path) -> TemplateDef:
     return TemplateDef(
         name=tmpl.get("name", path.stem),
         description=tmpl.get("description", ""),
-        command=tmpl.get("command", ["claude"]),
+        command=tmpl.get("command", ["openclaw"]),
         backend=tmpl.get("backend", "tmux"),
         leader=leader,
         agents=agents,

@@ -1,7 +1,7 @@
 [template]
 name = "hedge-fund"
 description = "AI Hedge Fund - multi-agent investment analysis team"
-command = ["claude"]
+command = ["openclaw"]
 backend = "tmux"
 
 [template.leader]

@@ -1,7 +1,7 @@
 [template]
 name = "research-paper"
 description = "Academic research team for literature review and paper writing"
-command = ["claude"]
+command = ["openclaw"]
 backend = "tmux"
 
 [template.leader]

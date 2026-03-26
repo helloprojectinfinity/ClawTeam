@@ -1,7 +1,7 @@
 [template]
 name = "code-review"
 description = "Multi-perspective code review team for thorough PR analysis"
-command = ["claude"]
+command = ["openclaw"]
 backend = "tmux"
 
 [template.leader]

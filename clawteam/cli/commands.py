@@ -2929,7 +2929,7 @@ def spawn_agent(
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1)
     elif not command:
-        command = ["claude"]
+        command = ["openclaw"]
 
     # Auto-register agent as team member
     from clawteam.team.manager import TeamManager
@@ -3803,12 +3803,25 @@ def launch_team(
 
     # 5. Create tasks
     ts = TaskStore(t_name)
+    # First pass: create all tasks and build name→id mapping
+    task_id_map: dict[str, str] = {}
     for task_def in tmpl.tasks:
-        ts.create(
+        t = ts.create(
             subject=task_def.subject,
             description=task_def.description,
             owner=task_def.owner,
         )
+        task_id_map[task_def.subject] = t.id
+    # Second pass: apply blocked_by dependencies
+    for task_def in tmpl.tasks:
+        if task_def.blocked_by:
+            resolved = []
+            for dep in task_def.blocked_by:
+                if dep in task_id_map:
+                    resolved.append(task_id_map[dep])
+                else:
+                    resolved.append(dep)  # treat as literal task ID
+            ts.update(task_id_map[task_def.subject], add_blocked_by=resolved)
 
     # 6. Get backend
     try:

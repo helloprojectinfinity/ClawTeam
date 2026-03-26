@@ -1,7 +1,7 @@
 [template]
 name = "strategy-room"
 description = "Cross-functional strategy team for planning, tradeoff analysis, and execution sequencing"
-command = ["claude"]
+command = ["openclaw"]
 backend = "tmux"
 
 [template.leader]
