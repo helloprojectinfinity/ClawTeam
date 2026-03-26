@@ -1,273 +1,264 @@
-# V1 Risk Assessment: ClawTeam Architecture
+# V1 Risk Assessment: AI Agent 未來發展趨勢
 
-> **Reviewer**: Risk Reviewer (poc-research)
+> **Reviewer**: Risk Reviewer (poc-phase1-research)
 > **Date**: 2026-03-26
-> **Codebase**: ClawTeam v0.2.0 (OpenClaw fork)
-> **Scope**: Multi-agent coordination, task dependency management, inbox communication, template system
+> **Scope**: Multi-agent coordination, automation workflows, memory systems
+> **Perspective**: Risk & Feasibility Analysis
 
 ---
 
 ## Executive Summary
 
-ClawTeam v0.2.0 is a **functional but immature** multi-agent orchestration framework. The architecture is sound in principle — file-based transport, tmux process isolation, DAG task dependencies — but carries **significant operational risks** at scale and in production scenarios. The most critical issues are: single-machine coupling, lack of authentication/authorization, file-system race conditions under concurrent load, and no graceful degradation when agents crash mid-task.
+AI Agent 生態正經歷從「單一智能體」到「多智能體協作」的範式轉移。Gartner 預測 2026 年底 40% 的企業應用將嵌入 AI Agent（2025 年僅 5%），市場規模預計從 78 億美元增長至 2030 年的 520 億美元。然而，這波快速成長伴隨著**系統性風險**：多智能體協調的複雜性爆炸、自動化工作流的安全漏洞、以及長期記憶系統的污染與濫用。
 
-**Overall Risk Rating: MEDIUM-HIGH** (acceptable for PoC/development, risky for production)
-
----
-
-## 1. Multi-Agent Coordination Mechanism
-
-### 1.1 Tmux Backend — Process Isolation Risks
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| Tmux session collision (multiple agents overwrite each other's pane) | HIGH | MEDIUM | Agent output mixed, task corruption |
-| Agent process dies silently, shell remains (bash/zsh) | HIGH | HIGH | False "alive" status, task hangs indefinitely |
-| No resource limits (CPU/memory per agent) | MEDIUM | HIGH | One agent can starve others |
-| Tmux not installed / version incompatibility | LOW | LOW | Complete spawn failure |
-
-**Key Finding — Zombie Detection Flaw** (`spawn/registry.py:120-140`):
-
-The `_tmux_pane_alive()` function checks `pane_dead` flag AND whether the running command is a shell (`bash`, `zsh`, `sh`, `fish`). If the agent process exits but leaves a shell running (which is the **default tmux behavior**), the agent is marked as dead. This is correct for detection but creates a **false negative** scenario: the `is_agent_alive()` call in `_acquire_lock()` (`store/file.py:97-104`) will release locks for agents that are technically "dead" but whose tmux window still exists — another agent could then take over the same task, causing **duplicate execution**.
-
-**Key Finding — No Agent Heartbeat**:
-
-There is no periodic heartbeat from agents back to the coordinator. The only liveness check is polling tmux pane state. If an agent enters an infinite loop or hangs (not crashed), it will appear "alive" forever. The `list_zombie_agents()` function (`registry.py:147-167`) has a `max_hours` threshold (default 2h), but this is only checked on-demand, not automatically.
-
-### 1.2 Spawn Adapter — Command Injection Surface
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| Shell injection via agent name / prompt text | HIGH | MEDIUM | Arbitrary command execution |
-| `--dangerously-skip-permissions` default = True | HIGH | HIGH | Agents run with full filesystem access |
-| Environment variable leakage between agents | MEDIUM | MEDIUM | Cross-agent credential exposure |
-
-**Key Finding — Shell Escaping Gaps** (`tmux_backend.py:100-110`):
-
-The `full_cmd` string is built by joining shell-quoted components, but the `export_str` uses `shlex.quote()` on values only. The environment variable *names* are filtered by regex (`_SHELL_ENV_KEY_RE`), but the `cmd_str` and `exit_hook` are concatenated into a single shell string. If `final_command` contains elements with shell metachacters that aren't properly quoted, this is an injection vector.
-
-More critically, the `_inject_prompt_via_buffer()` function writes prompts to temp files and loads them via tmux buffer — this bypasses shell escaping but the prompt content is **not sanitized**. A malicious prompt could contain tmux control sequences.
-
-### 1.3 Coordination Protocol — No Consensus Mechanism
-
-The current model is **leader-driven**: the leader assigns tasks, workers execute and report back. There is:
-- No voting or consensus for task completion validation
-- No mechanism for agents to negotiate task ownership
-- No conflict resolution when two agents claim the same task (relies solely on file locking)
-
-This is acceptable for single-leader topologies but breaks down if the leader crashes or if you need peer-to-peer agent coordination.
+**Overall Risk Rating: HIGH**（技術成熟度不足，但商業壓力驅使快速採用）
 
 ---
 
-## 2. Task Dependency Management
+## 1. Multi-Agent Coordination — 協調機制風險
 
-### 2.1 DAG Validation — Correct but Incomplete
-
-| Risk | Severity | Likelihood | Impact |
-|------|----------|------------|--------|
-| Cycle detection only on create/update, not on bulk operations | LOW | LOW | Theoretical — unlikely in practice |
-| `blocked_by` resolution is O(n) scan of ALL tasks | MEDIUM | HIGH | Performance degradation with 100+ tasks |
-| No partial completion / checkpoint support | MEDIUM | MEDIUM | Agent crash = restart from scratch |
-| Task status transitions not enforced (any → any) | MEDIUM | LOW | Invalid state machine transitions |
-
-**Key Finding — Dependency Resolution is Scan-Based** (`store/file.py:176-190`):
-
-When a task completes, `_resolve_dependents_unlocked()` scans **every task file** on disk to find dependents. For a team with 200 tasks, this means reading and parsing 200 JSON files on every task completion. This is O(n) per completion, O(n²) for full pipeline.
-
-**Recommendation**: Maintain a reverse-dependency index (task_id → list of dependents) updated at creation time.
-
-### 2.2 Task Locking — Advisory, Not Mandatory
-
-The task lock system (`_acquire_lock`) is **advisory**:
-- Locks are only checked when status = `in_progress`
-- A worker can `update` a task's metadata, description, or priority without acquiring a lock
-- The `--force` flag bypasses lock checking entirely
-- No lock timeout / auto-release mechanism (relies on `release_stale_locks()` being called manually)
-
-**Risk**: Two agents can simultaneously modify the same task's non-status fields without detection.
-
-### 2.3 No Task Retry / Rollback
-
-If a task fails (agent crashes, produces wrong output), there is:
-- No automatic retry mechanism
-- No rollback of partially completed work
-- No way to mark a task as "failed" (only `pending`, `in_progress`, `completed`, `blocked`)
-- The `TaskStatus` enum lacks a `failed` state
-
-**Impact**: The leader must manually detect failures and reassign tasks. The `TaskWaiter` detects dead agents and resets their tasks to `pending`, but this is reactive, not proactive.
-
----
-
-## 3. Inbox Communication System
-
-### 3.1 File Transport — Race Conditions
+### 1.1 級聯故障（Cascading Failures）
 
 | Risk | Severity | Likelihood | Impact |
 |------|----------|------------|--------|
-| Message loss on concurrent writes to same inbox | MEDIUM | MEDIUM | Missed coordination messages |
-| `.consumed` file lock is advisory (fcntl flock) | MEDIUM | LOW | Double-read of same message |
-| No message ordering guarantee across agents | LOW | MEDIUM | Out-of-order task execution |
-| Dead letter queue grows unbounded | LOW | HIGH | Disk space exhaustion |
+| 單一 Agent 錯誤傳播至整個系統 | CRITICAL | HIGH | 整體任務失敗 |
+| 共享 LLM 的系統性偏差 | HIGH | HIGH | 所有 Agent 同時犯錯 |
+| 缺乏回滾機制 | HIGH | MEDIUM | 錯誤無法修正 |
 
-**Key Finding — Atomic Write is Partial** (`transport/file.py:47-54`):
+**核心問題**：當多個 Agent 共用同一個 LLM（如 GPT-4、Claude），模型的系統性偏差會在所有 Agent 中同時出現。一個 Agent 的幻覺（hallucination）可能被其他 Agent 當作「事實」傳播，形成**錯誤放大循環**。
 
-The `deliver()` method uses tmp + rename for atomicity, which is correct for single-writer scenarios. However, when **multiple agents send to the same recipient simultaneously**, the rename operations are not serialized. On most filesystems, `rename()` is atomic for the directory entry, but the ordering of multiple concurrent renames is undefined. This means message ordering is **not guaranteed**.
+**業界現狀**：
+- IBM 強調需要「沙盒環境壓力測試」和「回滾機制」
+- 目前大多數框架缺乏「錯誤隔離」（fault isolation）機制
+- Deloitte 預測：不良的 Agent 編排可能使市場價值縮減 15-30%
 
-**Key Finding — Claimed Message Lock Leak** (`transport/file.py:76-100`):
-
-The `claim_messages()` method opens a file handle and applies `fcntl.flock()`. If the agent process crashes after claiming but before calling `ack()` or `quarantine()`, the file handle is never closed and the lock is never released. The OS will eventually clean up when the process dies, but if the ClawTeam process itself is long-running, these leaked locks accumulate.
-
-The `_is_locked()` function (`transport/file.py:40-52`) is a "best-effort" probe that tries to acquire and immediately release the lock. This has a **TOCTOU race**: between the release and the caller's subsequent use, another process could claim the message.
-
-### 3.2 No Message Persistence Guarantee
-
-Messages are files on disk. There is:
-- No fsync after write (data could be in OS buffer cache)
-- No replication or backup
-- No message acknowledgment from the recipient (only from the transport layer)
-- If the disk fails, all in-flight messages are lost
-
-### 3.3 Broadcast is Member-List Dependent
-
-The `broadcast()` method (`mailbox.py:70-90`) iterates over `self._transport.list_recipients()`, which reads the inbox directory listing. If a member was added but its inbox directory wasn't created yet (race condition), that member won't receive the broadcast.
-
----
-
-## 4. Template System
-
-### 4.1 TOML Parsing — No Validation Beyond Schema
+### 1.2 通訊協議碎片化
 
 | Risk | Severity | Likelihood | Impact |
 |------|----------|------------|--------|
-| User templates can override built-in templates (name collision) | MEDIUM | MEDIUM | Unexpected behavior |
-| No template versioning or migration | LOW | MEDIUM | Breaking changes on upgrade |
-| `{goal}` variable substitution is unescaped | MEDIUM | LOW | Template injection |
-| Command field defaults to `["openclaw"]` — hardcoded | LOW | LOW | Won't work without openclaw installed |
+| 缺乏統一的 Agent 間通訊標準 | HIGH | HIGH | 系統整合困難 |
+| 狀態管理跨 Agent 邊界不一致 | HIGH | HIGH | 任務衝突 |
+| 衝突解決機制不足 | MEDIUM | MEDIUM | 死鎖或資源競爭 |
 
-**Key Finding — Template Override Without Audit** (`templates/__init__.py:120-140`):
+**核心問題**：Agent 之間的通訊協議目前是**各自為政**：
+- 沒有統一的訊息格式標準
+- 沒有跨框架的互操作性（A2A、MCP 等協議仍在早期）
+- 狀態同步依賴檔案系統或自定義中介層
 
-User templates in `~/.clawteam/templates/` take priority over built-in templates. A malicious or accidental user template with the same name as a built-in will silently override it. There is no:
-- Checksum verification
-- Warning when overriding
-- Template signing or provenance tracking
+**工程挑戰**（MachineLearningMastery 2026）：
+> "Inter-agent communication protocols, state management across agent boundaries, conflict resolution mechanisms, and orchestration logic become core challenges that didn't exist in single-agent systems."
 
-**Key Finding — Variable Substitution is Format-Based** (`templates/__init__.py:65-72`):
+### 1.3 編排複雜性爆炸
 
-The `render_task()` function uses `str.format_map(_SafeDict(...))`. The `_SafeDict` class keeps unknown placeholders intact, which is safe. However, if a user passes a `goal` variable containing `{agent_name}` or other template variables, those will be **recursively substituted** in the next render pass. This is a minor injection risk.
+當 Agent 數量增加時，協調複雜度呈**指數增長**：
 
-### 4.2 No Template Composition
+```
+2 agents  → 1 條通訊管道
+3 agents  → 3 條通訊管道
+5 agents  → 10 條通訊管道
+10 agents → 45 條通訊管道
+n agents  → n(n-1)/2 條通訊管道
+```
 
-Templates are flat TOML files. There is:
-- No `extends` or `include` mechanism
-- No conditional agent inclusion (e.g., "only add reviewer if task count > 5")
-- No dynamic task generation from templates
-
-This limits template reusability for complex workflows.
+**風險**：超過 5-7 個 Agent 的系統，如果沒有良好的編排架構（如階層式、序列式），會陷入「通訊風暴」——Agent 花更多時間協調而非執行任務。
 
 ---
 
-## 5. Cross-Cutting Concerns
+## 2. Automation Workflows — 自動化工作流風險
 
-### 5.1 Authentication & Authorization — Absent
+### 2.1 權限提升與自主行動
 
 | Risk | Severity | Likelihood | Impact |
 |------|----------|------------|--------|
-| Any process on the machine can read/write team data | CRITICAL | HIGH | Full system compromise |
-| No agent identity verification | HIGH | HIGH | Agent impersonation |
-| Config file is world-readable (default umask) | MEDIUM | HIGH | Credential leakage via profiles |
+| Agent 自主執行未經授權的操作 | CRITICAL | HIGH | 資料外洩、系統損壞 |
+| 缺乏 Human-in-the-Loop 強制機制 | HIGH | MEDIUM | 關鍵決策無人審核 |
+| 工具調用缺乏沙盒隔離 | HIGH | HIGH | 任意程式碼執行 |
 
-There is **zero authentication** in the current architecture. Any process that can read `~/.clawteam/` can:
-- Read all team configurations
-- Read/write all task files
-- Read/write all inbox messages
-- Impersonate any agent by setting `CLAWTEAM_AGENT_NAME` env var
+**核心問題**：當 Agent 獲得工具使用能力（檔案讀寫、API 呼叫、程式執行），它們的行動範圍從「生成文字」擴展到「改變現實」。如果缺乏適當的權限控制：
+- 一個被 prompt injection 攻擊的 Agent 可能刪除檔案、發送郵件、執行惡意程式
+- 多 Agent 系統中，一個被入侵的 Agent 可能利用其他 Agent 的信任關係橫向移動
 
-The `identity.py` module provides agent identity via environment variables, but this is **self-reported** — there is no cryptographic verification.
+**業界共識**（IBM 2025）：
+> "These systems must be rigorously stress-tested in sandbox environments to avoid cascading failures. Designing mechanisms for rollback actions and ensuring audit logs are integral."
 
-### 5.2 Single-Machine Coupling
+### 2.2 供應鏈攻擊面
 
-The entire system is designed for single-machine operation:
-- File-based transport (local filesystem only)
-- Tmux backend (local process management only)
-- No network communication layer (P2P transport exists but is experimental)
+| Risk | Severity | Likelihood | Impact |
+|------|----------|------------|--------|
+| 惡意工具/插件注入 | HIGH | MEDIUM | Agent 行為被操控 |
+| 第三方 LLM API 的信任邊界模糊 | MEDIUM | HIGH | 資料洩漏 |
+| Agent 之間的隱式信任鏈 | HIGH | MEDIUM | 橫向移動攻擊 |
 
-The ROADMAP.md acknowledges this and plans Redis transport for v0.4, but until then, **all agents must run on the same machine**.
+**攻擊向量**：
+1. **工具投毒**：惡意工具回傳精心構造的輸入，操控 Agent 行為
+2. **記憶體投毒**：在 Agent 的長期記憶中植入惡意指令（見第 3 節）
+3. **Prompt Injection**：透過使用者輸入或外部資料注入惡意指令
 
-### 5.3 Observability — Minimal
+### 2.3 可觀測性與審計不足
 
-- No structured logging (only print statements)
-- No metrics collection (task duration, message latency, agent utilization)
-- No distributed tracing
-- The event log (`events/` directory) is append-only but has no rotation or size limits
+| Risk | Severity | Likelihood | Impact |
+|------|----------|------------|--------|
+| 缺乏結構化日誌 | MEDIUM | HIGH | 故障無法診斷 |
+| 決策過程不可追溯 | HIGH | MEDIUM | 問責困難 |
+| 沒有即時監控告警 | MEDIUM | HIGH | 問題發現延遲 |
 
-### 5.4 Data Durability
-
-All data is stored as JSON files in `~/.clawteam/`:
-- No database (no ACID transactions)
-- No backup mechanism
-- No data migration tooling
-- File-level atomic writes (tmp + rename) but no directory-level atomicity
+**現狀**：大多數 Agent 框架的日誌能力僅限於 print 語句或簡單的事件記錄，缺乏：
+- 分散式追蹤（distributed tracing）
+- 決策鏈可視化
+- 即時異常偵測
 
 ---
 
-## 6. Risk Matrix Summary
+## 3. Memory Systems — 記憶系統風險
 
-| Category | Risk | Severity | Likelihood | Mitigation Priority |
-|----------|------|----------|------------|---------------------|
-| Security | No authentication/authorization | CRITICAL | HIGH | P0 |
-| Security | `--dangerously-skip-permissions` default | HIGH | HIGH | P0 |
-| Reliability | Agent zombie (hangs but appears alive) | HIGH | HIGH | P1 |
-| Reliability | Task lock leak on agent crash | MEDIUM | HIGH | P1 |
-| Performance | O(n) dependency resolution scan | MEDIUM | HIGH | P2 |
-| Reliability | Message ordering not guaranteed | LOW | MEDIUM | P2 |
-| Security | Template override without audit | MEDIUM | MEDIUM | P2 |
-| Scalability | Single-machine coupling | HIGH | N/A (architectural) | P3 |
-| Observability | No structured logging/metrics | MEDIUM | HIGH | P3 |
-| Durability | No backup/replication | MEDIUM | MEDIUM | P3 |
+### 3.1 記憶體投毒（Memory Poisoning）
+
+| Risk | Severity | Likelihood | Impact |
+|------|----------|------------|--------|
+| 惡意資料注入長期記憶 | CRITICAL | MEDIUM | 持續性行為操控 |
+| 幻覺被固化為「事實」 | HIGH | HIGH | 錯誤決策循環 |
+| 記憶體膨脹與退化 | MEDIUM | HIGH | 效能下降 |
+
+**這是 2026 年最被低估的 Agent 安全威脅。**
+
+**攻擊機制**（InstaTunnel 2026）：
+> "A single malicious document ingested six months ago can still be 'present' and 'influential' in the current reasoning chain."
+
+**運作方式**：
+1. 攻擊者在 Agent 可存取的資料源中植入惡意內容
+2. Agent 將該內容存入長期記憶（向量資料庫、知識圖譜）
+3. 六個月後，Agent 在推理時檢索到該記憶，將其當作可信事實使用
+4. 惡意影響持續存在，即使原始資料已被移除
+
+**防禦缺口**：
+- 目前沒有記憶體來源追溯機制
+- 向量資料庫的相似性搜尋無法區分「可信」與「被污染」的記憶
+- 缺乏記憶體「過期」或「撤銷」機制
+
+### 3.2 幻覺固化（Hallucination Crystallization）
+
+| Risk | Severity | Likelihood | Impact |
+|------|----------|------------|--------|
+| Agent 的幻覺被存入記憶並重複引用 | HIGH | HIGH | 錯誤知識累積 |
+| 缺乏事實驗證機制 | HIGH | MEDIUM | 虛假資訊傳播 |
+| 跨 Agent 的幻覺共振 | MEDIUM | MEDIUM | 系統性偏差 |
+
+**數據**：頂級 LLM 仍然有 0.7% 到 30% 的幻覺率（Drainpipe 2025）。當 Agent 將幻覺存入記憶後：
+- 該幻覺成為未來推理的「上下文」
+- 其他 Agent 可能引用該記憶，形成「幻覺共振」
+- 隨著時間推移，虛假知識庫不斷膨脹
+
+### 3.3 隱私與合規風險
+
+| Risk | Severity | Likelihood | Impact |
+|------|----------|------------|--------|
+| PII（個人識別資訊）洩漏至記憶系統 | CRITICAL | MEDIUM | GDPR/個資法違規 |
+| 跨 Agent 記憶共享導致資料外洩 | HIGH | MEDIUM | 合規風險 |
+| 記憶體無法真正「刪除」 | MEDIUM | HIGH | 被遺忘權（Right to be Forgotten）問題 |
+
+**合規挑戰**：
+- 向量資料庫中的資料難以精確刪除（嵌入向量不可逆）
+- 多 Agent 共享記憶時，資料流向難以追蹤
+- 缺乏記憶體存取控制（哪個 Agent 可以讀寫哪些記憶）
+
+---
+
+## 4. Cross-Cutting Concerns — 跨領域風險
+
+### 4.1 勞動力影響
+
+- AI Agent 正從「內容生成器」進化為「自主問題解決者」
+- 這引發自動化取代工作、監控、工作場所權力失衡的擔憂
+- 缺乏產業標準的「人機協作」框架
+
+### 4.2 基礎設施壓力
+
+- 資料中心擴張對能源網造成壓力
+- Agent 的持續運行（24/7）增加碳足跡
+- 邊緣部署的 Agent 缺乏資源隔離
+
+### 4.3 市場泡沫風險
+
+- 市場預測從 85 億（2026）到 350 億（2030）美元，但實際落地案例有限
+- 「Pilot Purgatory」——大量概念驗證，少量生產部署
+- 技術成熟度曲線（Hype Cycle）可能即將進入「幻滅谷底」
+
+---
+
+## 5. Risk Matrix Summary
+
+| Category | Risk | Severity | Likelihood | Priority |
+|----------|------|----------|------------|----------|
+| Memory | 記憶體投毒（長期惡意影響） | CRITICAL | MEDIUM | P0 |
+| Multi-Agent | 級聯故障（共享 LLM 偏差） | CRITICAL | HIGH | P0 |
+| Automation | 權限提升（未授權操作） | CRITICAL | HIGH | P0 |
+| Memory | 幻覺固化（錯誤知識累積） | HIGH | HIGH | P1 |
+| Multi-Agent | 通訊協議碎片化 | HIGH | HIGH | P1 |
+| Automation | 供應鏈攻擊（工具投毒） | HIGH | MEDIUM | P1 |
+| Memory | 隱私合規（PII 洩漏） | CRITICAL | MEDIUM | P1 |
+| Multi-Agent | 編排複雜性爆炸 | HIGH | MEDIUM | P2 |
+| Automation | 可觀測性不足 | MEDIUM | HIGH | P2 |
+| Cross-Cutting | 市場泡沫 / Pilot Purgatory | MEDIUM | HIGH | P3 |
+
+---
+
+## 6. Feasibility Assessment
+
+| Aspect | Assessment | Notes |
+|--------|------------|-------|
+| **技術可行性** | ⚠️ MEDIUM | 核心技術可用，但整合與可靠性不足 |
+| **安全可行性** | ❌ LOW | 記憶體投毒、prompt injection 等威脅缺乏成熟防禦 |
+| **商業可行性** | ✅ HIGH | 市場需求明確，投資活躍 |
+| **合規可行性** | ⚠️ MEDIUM | 法規框架仍在演進，跨司法管轄區合規困難 |
+| **人才可行性** | ⚠️ MEDIUM | 多智能體系統專家稀缺 |
 
 ---
 
 ## 7. Recommendations
 
-### Immediate (P0 — Before Any Production Use)
+### Immediate (P0 — 立即行動)
 
-1. **Add authentication**: At minimum, use HMAC signatures on messages. Ideally, use mTLS or SSH keys for agent identity.
-2. **Change `skip_permissions` default to `False`**: The current default (`True`) means every spawned agent has unrestricted filesystem access.
-3. **Add task `failed` status**: Extend `TaskStatus` enum with `failed` and implement failure detection in `TaskWaiter`.
+1. **記憶體來源追溯**：為每個記憶條目附加來源標籤、時間戳、可信度評分
+2. **沙盒隔離強制**：所有 Agent 的工具調用必須在沙盒環境執行
+3. **Human-in-the-Loop 閘門**：關鍵操作（檔案刪除、外部通訊）必須人工審核
 
-### Short-term (P1 — Next Sprint)
+### Short-term (P1 — 下一迭代)
 
-4. **Implement agent heartbeat**: Agents should periodically write a timestamp file. The registry should check this instead of relying solely on tmux pane state.
-5. **Add lock timeout**: Task locks should auto-expire after a configurable duration (e.g., 30 minutes).
-6. **Fix lock leak**: Use context managers or `atexit` handlers to ensure claimed message locks are always released.
+4. **記憶體投毒防禦**：實作記憶體驗證機制（交叉比對、來源可信度）
+5. **統一通訊協議**：採用或定義 Agent 間通訊標準（A2A、MCP）
+6. **結構化日誌**：所有 Agent 行動必須記錄決策鏈
 
-### Medium-term (P2 — Next Quarter)
+### Medium-term (P2 — 季度規劃)
 
-7. **Build reverse-dependency index**: Maintain a `task-{id}.json → [dependent-task-ids]` mapping to make resolution O(1) instead of O(n).
-8. **Add template checksums**: Sign built-in templates and verify user templates haven't tampered with them.
-9. **Implement message ordering**: Use logical clocks (Lamport timestamps) or sequence numbers for deterministic ordering.
+7. **記憶體過期機制**：實作 TTL（Time-to-Live）和自動清理
+8. **跨 Agent 存取控制**：基於角色的記憶體讀寫權限
+9. **回滾框架**：Agent 行動的原子性與可逆性
 
-### Long-term (P3 — Roadmap Alignment)
+### Long-term (P3 — 年度願景)
 
-10. **Redis transport**: As planned in ROADMAP.md Phase 2, for cross-machine communication.
-11. **Structured logging**: Replace print statements with `structlog` or similar.
-12. **Data migration tooling**: For schema evolution as the data model changes.
-
----
-
-## 8. Feasibility Assessment
-
-| Aspect | Assessment | Notes |
-|--------|------------|-------|
-| **Technical feasibility** | ✅ HIGH | Architecture is sound, code is clean, tests exist |
-| **Operational feasibility** | ⚠️ MEDIUM | Requires manual monitoring, no self-healing |
-| **Security feasibility** | ❌ LOW | No auth = unsuitable for multi-tenant or networked use |
-| **Scalability feasibility** | ⚠️ MEDIUM | Single-machine limit, O(n) scans, file-based I/O |
-| **Maintainability** | ✅ HIGH | Clean codebase, good separation of concerns, Pydantic models |
-
-**Bottom line**: ClawTeam v0.2.0 is an excellent **development and PoC tool**. It should NOT be used in production without addressing the P0 security issues. The architecture is well-designed for its current scope (single-machine, single-user, trusted environment) and the roadmap addresses the key limitations.
+10. **聯邦記憶架構**：分散式記憶系統，避免單點故障
+11. **Agent 信任評分**：基於歷史表現的動態信任度量
+12. **合規自動化**：自動檢測 PII 和法規合規性
 
 ---
 
-_Report generated by Risk Reviewer — poc-research team_
+## 8. Conclusion
+
+AI Agent 的未來發展充滿機遇，但風險同樣巨大。**記憶體投毒**和**級聯故障**是 2026 年最被低估的威脅——它們的影響是持久且難以偵測的。產業需要從「快速部署」轉向「安全部署」，在追求自主性的同時，建立堅實的信任、安全與合規基礎。
+
+> **Bottom line**: The technology works. The governance doesn't — yet.
+
+---
+
+_Report generated by Risk Reviewer — poc-phase1-research team_
 _Output: reports/V1-risk.md_
+
+### Sources
+
+- [1] MachineLearningMastery — 7 Agentic AI Trends to Watch in 2026
+- [2] IONI — Multi-AI Agents Systems in 2025: Key Insights
+- [3] IBM — AI Agents in 2025: Expectations vs. Reality
+- [4] Deloitte — Unlocking Exponential Value with AI Agent Orchestration
+- [5] InstaTunnel — Agentic Memory Poisoning (Medium, Jan 2026)
+- [6] Drainpipe — The Reality of AI Hallucinations in 2025
+- [7] Gartner — 40% of Enterprise Apps Will Feature AI Agents by 2026
