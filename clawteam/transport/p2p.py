@@ -120,7 +120,8 @@ class P2PTransport(Transport):
         while not self._heartbeat_stop.wait(self._peer_heartbeat_interval_s):
             try:
                 self._register_peer()
-            except Exception:
+            except OSError:
+                # Peer registration is best-effort in heartbeat loop
                 continue
 
     def _register_peer(self) -> None:
@@ -174,7 +175,7 @@ class P2PTransport(Transport):
                 return None
             port = info["port"]
             return f"tcp://{host}:{port}"
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             return None
 
     @staticmethod
@@ -210,7 +211,8 @@ class P2PTransport(Transport):
                 sock = self._get_or_create_push(addr)
                 sock.send(data, zmq.NOBLOCK)
                 return
-            except Exception:
+            except (zmq.ZMQError, OSError, ImportError):
+                # ZMQ send failed — fall back to file delivery
                 pass
         # Peer unreachable — fall back to file
         self._file_fallback.deliver(recipient, data)
@@ -308,18 +310,18 @@ class P2PTransport(Transport):
         for sock in self._push_cache.values():
             try:
                 sock.close()
-            except Exception:
+            except OSError:
                 pass
         self._push_cache.clear()
         if self._pull:
             try:
                 self._pull.close()
-            except Exception:
+            except OSError:
                 pass
             self._pull = None
         if self._ctx:
             try:
                 self._ctx.term()
-            except Exception:
+            except OSError:
                 pass
             self._ctx = None

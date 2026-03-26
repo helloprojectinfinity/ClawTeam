@@ -1052,7 +1052,7 @@ def profile_doctor(
             data = json.loads(claude_state_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 data = {}
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             data = {}
     else:
         data = {}
@@ -1116,14 +1116,14 @@ def config_health():
     # Mount point check
     try:
         checks["is_mount"] = os.path.ismount(str(data_dir))
-    except Exception:
+    except OSError:
         checks["is_mount"] = False
 
     # Teams count
     try:
         teams = TeamManager.discover_teams()
         checks["teams_count"] = len(teams)
-    except Exception:
+    except (OSError, ValueError):
         checks["teams_count"] = 0
 
     # User
@@ -3028,8 +3028,12 @@ def spawn_agent(
         if ws_mgr is not None and cwd:
             try:
                 ws_mgr.cleanup_workspace(_team, _name, auto_checkpoint=False)
-            except Exception:
-                pass
+            except (OSError, ValueError) as exc:
+                # Cleanup on failure — log but don't mask the original error
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Workspace cleanup failed for %s/%s: %s", _team, _name, exc
+                )
         _output({"error": result}, lambda d: console.print(f"[red]{d['error']}[/red]"))
         raise typer.Exit(1)
 
