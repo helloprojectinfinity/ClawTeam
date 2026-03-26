@@ -1,404 +1,322 @@
-# R1: ClawTeam 架構設計深度分析
+# R1: AI Agent 未來發展趨勢 — 技術架構分析
 
 > Researcher: researcher-arch
-> Focus: 技術架構、多 Agent 協調機制、Task 依賴管理、Inbox 通訊系統、Template 系統
+> Focus: 多 Agent 協調機制、自動化工作流、記憶系統
+> Date: 2026-03-26
 
 ---
 
-## 1. 整體架構總覽
+## Executive Summary
 
-ClawTeam 係一個 **framework-agnostic** 嘅多 Agent 協調框架，核心設計理念係「Leader Agent 自主協調 Worker Agents」。人類只需要提供目標，系統自動處理 spawn、task 分配、通訊、進度監控。
+AI Agent 正從「單一對話助手」演進為「自主協作的數位團隊」。2026 年係關鍵轉折點：
+- Gartner 報告多 Agent 系統查詢量從 2024 Q1 到 2025 Q2 **暴增 1,445%**
+- 市場預計從 78 億美元成長至 2030 年 520 億美元
+- 40% 企業應用將嵌入 AI Agent（2025 年僅 5%）
+- 協議標準化（MCP + A2A）正在建立「Agent 互聯網」嘅基礎
 
-### 1.1 分層架構
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   CLI Layer (Typer)                  │
-│  clawteam spawn | task | inbox | board | launch ... │
-├─────────────────────────────────────────────────────┤
-│              Coordination Layer                      │
-│  TeamManager │ MailboxManager │ TaskStore │ PlanMgr │
-├─────────────────────────────────────────────────────┤
-│              Execution Layer                         │
-│  SpawnBackend (tmux │ subprocess) │ Adapters        │
-├─────────────────────────────────────────────────────┤
-│              Transport Layer                         │
-│  FileTransport │ P2PTransport (ZeroMQ)              │
-├─────────────────────────────────────────────────────┤
-│              Storage Layer                           │
-│  Filesystem (JSON files) │ Git Worktrees            │
-└─────────────────────────────────────────────────────┘
-```
-
-### 1.2 核心組件對應
-
-| 組件 | 模組 | 職責 |
-|------|------|------|
-| Team Manager | `team/manager.py` | 團隊生命週期（create/add_member/cleanup） |
-| Mailbox Manager | `team/mailbox.py` | Agent 間通訊（send/broadcast/receive） |
-| Task Store | `store/file.py` | 任務 CRUD + 依賴管理 + 鎖機制 |
-| Spawn Backend | `spawn/tmux_backend.py` | Agent 進程啟動（tmux window） |
-| Adapters | `spawn/adapters.py` | 各 CLI 工具嘅命令適配 |
-| Transport | `transport/` | 訊息傳遞（檔案 / ZeroMQ P2P） |
-| Templates | `templates/` | TOML 團隊模板系統 |
+本報告從技術架構角度分析三大核心趨勢。
 
 ---
 
-## 2. 多 Agent 協調機制
+## 1. 多 Agent 協調：AI 嘅「微服務時刻」
 
-### 2.1 Spawn 流程
+### 1.1 從單體到分佈式
 
-Leader Agent 透過 `clawteam spawn` 命令創建 Worker。流程如下：
+正如單體應用演進為微服務架構，單一全能 Agent 正被**專業化 Agent 團隊**取代。
+
+**核心設計模式：**
+
+| 模式 | 描述 | 代表框架 |
+|------|------|----------|
+| **Orchestrator-Worker** | Leader 分配任務給 Specialist | ClawTeam, CrewAI |
+| **Conversation-Driven** | Agent 透過對話驅動協作 | AutoGen |
+| **State Machine** | 用狀態圖管理 Agent 工作流 | LangGraph |
+| **Peer-to-Peer** | Agent 自主發現同協作 | OpenAgents |
+
+**關鍵發現（2026 年框架比較）：**
+
+- **LangGraph**：最適合 production-grade，狀態圖管理最嚴謹，token 效率最高
+- **CrewAI**：角色定義最直覺，每日處理超過 1,200 萬次執行
+- **AutoGen**：延遲最低，適合 Microsoft 生態系統
+- **OpenAgents**：唯一原生支持 MCP + A2A 嘅框架
+
+### 1.2 協調挑戰
+
+多 Agent 系統引入咗單 Agent 系統唔存在嘅核心挑戰：
 
 ```
-Leader 決定需要一個 worker
-    ↓
-clawteam spawn --team my-team --agent-name worker1 --task "Implement auth"
-    ↓
-1. 創建 team（如果不存在）→ TeamManager.create_team()
-2. 註冊 member → TeamManager.add_member()
-3. 創建 git worktree（隔離工作區）→ WorkspaceManager.create_workspace()
-4. 構建 prompt（identity + task + coordination guide）→ build_agent_prompt()
-5. 啟動 tmux window → TmuxBackend.spawn()
-6. 註冊到 spawn registry → register_agent()
-7. 注入 prompt（tmux paste-buffer / send-keys）
+挑戰 1: Agent 間通訊協議
+    → MCP 解決 Agent ↔ 工具通訊
+    → A2A 解決 Agent ↔ Agent 通訊
+
+挑戰 2: 跨 Agent 狀態管理
+    → Task 依賴圖（DAG）
+    → 共享上下文傳遞
+
+挑戰 3: 衝突解決
+    → 多 Agent 修改同一文件
+    → 資源競爭
+
+挑戰 4: 錯誤恢復
+    → Agent crash 後嘅 task 重試
+    → 部分失敗嘅回滾機制
 ```
 
-**關鍵設計：**
-- 每個 Agent 有獨立嘅 **tmux window**（可視化監控）
-- 每個 Agent 有獨立嘅 **git worktree**（代碼隔離）
-- 每個 Agent 有獨立嘅 **inbox 目錄**（通訊隔離）
-- Agent 透過 **環境變數** 獲取身份（`CLAWTEAM_AGENT_NAME`, `CLAWTEAM_TEAM_NAME` 等）
+### 1.3 ClawTeam 嘅架構選擇
 
-### 2.2 Agent 身份系統
+ClawTeam 採用 **Orchestrator-Worker + File-based State** 模式：
+- Leader Agent 透過 `clawteam spawn` 創建 Worker
+- Task Store 用 JSON file + file lock 做並發控制
+- `blocked_by` 實現 DAG 依賴（完成觸發 cascade unlock）
+- 但 **唔自動 spawn** —— 解鎖後需要 agent 自己 poll
 
-```python
-# identity.py
-class AgentIdentity:
-    agent_id: str      # 唯一標識（12 位 hex）
-    agent_name: str    # 邏輯名稱（如 "researcher-arch"）
-    agent_type: str    # 類型（leader, researcher, writer, reviewer...）
-    team_name: str     # 所屬團隊
-    user: str          # 用戶標識
-    is_leader: bool    # 是否為 Leader
-```
-
-身份透過環境變數傳遞，Agent 啟動時自動讀取。
-
-### 2.3 多 CLI 支持
-
-`adapters.py` 實現咗一個 **NativeCliAdapter**，支持 8 種 CLI 工具：
-
-| CLI | 命令偵測 | 特殊處理 |
-|-----|----------|----------|
-| Claude Code | `claude`, `claude-code` | `--dangerously-skip-permissions`, prompt injection via buffer |
-| Codex | `codex`, `codex-cli` | `--dangerously-bypass-approvals-and-sandbox` |
-| OpenClaw | `openclaw` | `--local`, `--session-id`, `--message` |
-| Gemini | `gemini` | `--yolo` |
-| Kimi | `kimi` | `-w workspace`, `--print -p prompt` |
-| Qwen | `qwen`, `qwen-code` | `--yolo` |
-| OpenCode | `opencode` | `--yolo` |
-| Nanobot | `nanobot` | `-w workspace`, `-m prompt` |
-
-**設計亮點：** 每種 CLI 嘅 prompt 注入方式都唔同（Claude 用 buffer paste，Codex 用 post-launch injection，OpenClaw 用 `--message` 參數），Adapter 統一咗呢啲差異。
+呢個設計簡單可靠，但缺少自動 handoff 機制。
 
 ---
 
-## 3. Task 依賴管理
+## 2. 協議標準化：MCP + A2A 建立 Agent 互聯網
 
-### 3.1 Task 數據模型
+### 2.1 MCP（Model Context Protocol）
 
-```python
-class TaskItem:
-    id: str                    # 8 位 hex UUID
-    subject: str               # 任務標題
-    description: str           # 任務描述
-    status: TaskStatus         # pending | in_progress | completed | blocked
-    priority: TaskPriority     # low | medium | high | urgent
-    owner: str                 # 負責 agent
-    locked_by: str             # 當前鎖定者
-    locked_at: str             # 鎖定時間
-    blocks: list[str]          # 此任務阻塞嘅任務 ID 列表
-    blocked_by: list[str]      # 阻塞此任務嘅任務 ID 列表
-    started_at: str            # 開始時間
-    created_at: str            # 創建時間
-    updated_at: str            # 更新時間
-    metadata: dict             # 額外數據（如 duration_seconds）
+**由 Anthropic 於 2024 年底推出，2025 年廣泛採用。**
+
+- **功能**：標準化 Agent 如何連接外部工具、數據庫、API
+- **類比**：好似 USB-C —— 一個協議連接所有設備
+- **現狀**：2026 年 2 月 SDK 月下載量達 9,700 萬次
+- **採用者**：Anthropic、OpenAI、Google、Microsoft、Amazon
+
+**架構意義：**
+```
+Agent (LLM)
+    ↓ MCP
+┌─────────┬─────────┬─────────┐
+│ Database │  API   │  Tool   │
+└─────────┴─────────┴─────────┘
 ```
 
-### 3.2 依賴解析機制
+以前每個工具要 custom integration，而家 plug-and-play。
 
-**創建時：**
-- 如果 `blocked_by` 非空，task 自動設為 `blocked` 狀態
-- 驗證唔可以有循環依賴（DFS cycle detection）
+### 2.2 A2A（Agent-to-Agent Protocol）
 
-**完成時自動解鎖：**
-```python
-def _resolve_dependents_unlocked(self, completed_task_id: str):
-    # 遍歷所有 task，如果某 task 嘅 blocked_by 包含已完成嘅 task_id
-    # → 移除該依賴
-    # → 如果 blocked_by 清空且狀態為 blocked → 改為 pending
+**由 Google 於 2025 年 4 月推出，現由 Linux Foundation 管理。**
+
+- **功能**：定義 Agent 之間點樣通訊、發現、協作
+- **類比**：好似 HTTP —— 任何瀏覽器可以訪問任何伺服器
+- **核心能力**：
+  - Agent 發現（Agent Card）
+  - 任務協商（Task Negotiation）
+  - 資料交換（Artifact Exchange）
+
+**架構意義：**
+```
+Agent A ←──A2A──→ Agent B ←──A2A──→ Agent C
+  │                │                │
+  MCP              MCP              MCP
+  │                │                │
+ Tool X          Tool Y           Tool Z
 ```
 
-**呢個設計嘅核心洞察：**
-- `blocked_by` 係 **單向依賴**（DAG，有向無環圖）
-- 完成一個 task 會觸發 **連鎖解鎖**（cascade unlock）
-- 但 **唔會自動 spawn agent** —— 解鎖後需要 Leader 或 Worker 自己 poll
+### 2.3 MCP vs A2A 嘅分工
 
-### 3.3 Task 鎖機制
+| 協議 | 層次 | 解決嘅問題 |
+|------|------|------------|
+| **MCP** | Agent ↔ 外部世界 | Agent 點樣使用工具同數據 |
+| **A2A** | Agent ↔ Agent | Agent 點樣互相通訊同協作 |
 
-```python
-def _acquire_lock(self, task, caller, force):
-    # 如果 task 已被鎖定且鎖定者仲 alive
-    # → 拋出 TaskLockError（除非 --force）
-    # 否則 → 設定 locked_by + locked_at
-```
-
-- 鎖定者 alive 判斷：透過 `spawn.registry.is_agent_alive()` 檢查 tmux pane / PID
-- Agent 退出時自動清理：`lifecycle on-exit` hook 重置 in_progress task 為 pending
-
-### 3.4 並發控制
-
-FileTaskStore 使用 **OS 級別嘅 advisory lock**：
-- Linux: `fcntl.flock(LOCK_EX)`
-- Windows: `msvcrt.locking(LK_LOCK)`
-
-每個 task 係獨立嘅 JSON file，寫入時用 **atomic rename**（write tmp → rename）防止 partial read。
+兩者互補，唔係競爭。MCP 裝備 Agent 嘅能力，A2A 連接 Agent 成為團隊。
 
 ---
 
-## 4. Inbox 通訊系統
+## 3. 記憶系統：從無狀態到持續學習
 
-### 4.1 架構設計
+### 3.1 問題根源
+
+LLM 本質上係 **無狀態** 嘅：
+- 只能喺有限嘅 context window 內運作
+- context window 越大，信號衰減越嚴重
+- 無法可靠地喺多次互動之間傳遞資訊
+
+呢個限制係構建真正持久、協作、個人化 Agent 嘅核心障礙。
+
+### 3.2 四大記憶架構模式
+
+#### 模式 1：MemGPT — 操作系統模式
+
+將記憶視為 **計算資源管理** 問題，虛擬化 LLM context 以模擬無限容量。
 
 ```
-MailboxManager（邏輯層）
-    ↓
-Transport（抽象層）
-    ↓
-FileTransport / P2PTransport（實現層）
+┌─────────────────────────────────────┐
+│         Primary Context (RAM)       │
+│  ┌──────────┬──────────┬─────────┐  │
+│  │ System   │ Working  │ FIFO    │  │
+│  │ Prompt   │ Context  │ Buffer  │  │
+│  └──────────┴──────────┴─────────┘  │
+├─────────────────────────────────────┤
+│       External Context (Disk)       │
+│  ┌──────────────┬──────────────┐    │
+│  │ Recall       │ Archival     │    │
+│  │ Storage      │ Storage      │    │
+│  │ (事件日誌)   │ (向量記憶)   │    │
+│  └──────────────┴──────────────┘    │
+└─────────────────────────────────────┘
 ```
 
-**MailboxManager** 負責：
-- 訊息構建（`TeamMessage` Pydantic model）
-- 事件日誌記錄（`events/` 目錄，永不消費）
-- 廣播（broadcast to all members）
+**運作機制：**
+- 當 Primary Context 接近容量閾值（如 70%），系統插入內部警告
+- LLM 自主決定保留咩、丟棄咩、存儲到邊度
+- 實現咗「無限 context window」嘅錯覺
 
-**Transport** 負責：
-- 訊息傳遞（deliver / fetch / count）
-- 並發控制（file lock / ZMQ）
+**優勢：** 自主管理、優雅嘅抽象
+**劣勢：** 記憶管理消耗推理帶寬、非結構化查詢困難
 
-### 4.2 訊息類型
+#### 模式 2：OpenAI Memory — 產品驅動模式
 
-```python
-class MessageType(str, Enum):
-    message = "message"                    # 普通訊息
-    join_request = "join_request"          # 加入請求
-    join_approved = "join_approved"        # 批准加入
-    join_rejected = "join_rejected"        # 拒絕加入
-    plan_approval_request = "..."          # 計劃審批請求
-    plan_approved = "plan_approved"        # 計劃批准
-    plan_rejected = "plan_rejected"        # 計劃拒絕
-    shutdown_request = "..."               # 關機請求
-    shutdown_approved = "..."              # 批准關機
-    shutdown_rejected = "..."              # 拒絕關機
-    idle = "idle"                          # 空閒通知
-    broadcast = "broadcast"                # 廣播
-```
+- **Saved Memories**：跨對話持久化嘅事實（用戶自動/手動提供）
+- **Chat History Search**：語義搜索歷史對話
+- **類比**：好似一個秘書自動記住你講過嘅每件事
 
-### 4.3 FileTransport 實現
+#### 模式 3：Claude Memory — 用戶控制模式
 
-每個訊息係一個 JSON file：
-```
-~/.clawteam/teams/{team}/inboxes/{agent}/msg-{timestamp}-{uuid}.json
-```
+- **Project-scoped**：記憶侷限於特定項目
+- **用戶決定**：咩要記、咩唔記
+- **類比**：好似一個有嚴格保密協議嘅顧問
 
-**關鍵機制：**
-1. **Atomic writes**: write tmp → rename（防止 partial read）
-2. **Claim-based consumption**: `.json` → `.consumed`（rename + file lock）
-3. **Dead letter queue**: 解析失敗嘅訊息移到 `dead_letters/` 目錄
-4. **Lock probe**: `_is_locked()` 檢查 file 係咪被其他進程鎖定
+#### 模式 4：Mem0 — 生產級記憶系統
 
-### 4.4 P2PTransport（ZeroMQ）
+2025 年 arXiv 論文提出嘅 production-ready 方案：
+- **動態更新**：用戶話「我搬咗去台北」→ 自動刪除舊地址、添加新地址
+- **向量 + 關鍵詞混合檢索**
+- **LOCOMO benchmark** 上超越 6 種 baseline
 
-```python
-class P2PTransport(Transport):
-    # PULL socket: 監聽 incoming messages
-    # PUSH socket: 發送 messages 到其他 agents
-    # Peer discovery: 透過 peers/{agent}.json
-    # Offline fallback: 如果 peer 唔 reachable → FileTransport
-```
+### 3.3 記憶類型分類
 
-**Peer 發現機制：**
-- 每個 agent 啟動時寫 `peers/{agent}.json`（host, port, pid, heartbeat）
-- Heartbeat thread 每秒更新 lease
-- 5 秒 lease 過期後自動清理
+基於認知科學，Agent 記憶分為三種類型：
 
-**設計亮點：** P2P 係 optional 優化，file transport 作為 fallback，確保離線 agent 都可以收到訊息。
+| 類型 | 功能 | 實現方式 |
+|------|------|----------|
+| **Episodic**（情景記憶） | 記住特定事件 | 對話日誌、事件序列 |
+| **Semantic**（語義記憶） | 記住事實知識 | 向量數據庫、知識圖譜 |
+| **Procedural**（程序記憶） | 記住點樣做事 | 微調後嘅模型參數 |
+
+### 3.4 ICLR 2026 Workshop：MemAgents
+
+學術界正積極推進 Agent 記憶研究：
+- **ICLR 2026** 舉辦 MemAgents Workshop
+- 涵蓋：episodic、semantic、working、parametric memory
+- 探索記憶同外部存儲嘅接口設計
 
 ---
 
-## 5. Template 系統
+## 4. 自動化工作流：從 Prompt 到 Process
 
-### 5.1 TOML 模板格式
+### 4.1 工作流編排模式
 
-```toml
-[template]
-name = "team-name"
-description = "..."
-command = ["openclaw"]      # 預設 CLI 命令
-backend = "tmux"            # 預設後端
+```
+模式 1: Sequential（順序）
+    Agent A → Agent B → Agent C
 
-[template.leader]
-name = "integrator"
-type = "leader"
-task = "You are the leader..."
+模式 2: Parallel（並行）
+    ┌→ Agent A →┐
+    │           ↓
+Goal ┼→ Agent B →┼→ Integrator
+    │           ↑
+    └→ Agent C →┘
 
-[[template.agents]]
-name = "researcher-arch"
-type = "researcher"
-task = "You are the researcher..."
+模式 3: Hierarchical（層級）
+    Leader
+    ├── Manager A
+    │   ├── Worker A1
+    │   └── Worker A2
+    └── Manager B
+        ├── Worker B1
+        └── Worker B2
 
-[[template.tasks]]
-subject = "Architecture research"
-owner = "researcher-arch"
-blocked_by = ["Other task"]   # 可選依賴
+模式 4: DAG（有向無環圖）
+    Task1 ──→ Task3 ──→ Task5
+      ↓         ↑
+    Task2 ──→ Task4
 ```
 
-### 5.2 模板加載優先級
+### 4.2 企業落地挑戰
 
-1. User templates: `~/.clawteam/templates/{name}.toml`
-2. Built-in templates: `clawteam/templates/{name}.toml`
+**McKinsey 研究發現：**
+- 近 2/3 組織正在試驗 AI Agent
+- 但 **少於 1/4 成功擴展到 production**
+- 高績效組織擴展 Agent 嘅可能性係同行嘅 3 倍
 
-### 5.3 變量替換
+**成功關鍵：**
+1. **重新設計工作流**，唔係將 Agent 疊加喺舊流程上
+2. **Agent-first thinking**：先諗 Agent 點做，再諗人點配合
+3. **清晰嘅成功指標**：唔係「用咗 Agent」，而係「效率提升咗幾多」
 
-```python
-def render_task(task: str, **variables: str) -> str:
-    return task.format_map(_SafeDict(**variables))
-# 支持: {goal}, {team_name}, {agent_name}
-# 未知變量保留原樣（唔會 KeyError）
-```
+### 4.3 2026 年主要落地領域
 
-### 5.4 Launch 流程
-
-`clawteam launch` 命令自動執行：
-1. 加載模板
-2. 創建團隊 + 註冊所有成員
-3. 創建所有 tasks（兩遍：先創建，再設 blocked_by 依賴）
-4. 按順序 spawn 所有 agents（leader first, then workers）
-5. 每個 agent 獲得包含身份 + 任務嘅完整 prompt
-
-### 5.5 現有模板
-
-| 模板 | 用途 |
-|------|------|
-| `swarm-thinking` | 多維度深度研究（arch + workflow + risk → writer） |
-| `research-paper` | AI 論文自動化研究 |
-| `code-review` | 代碼審查團隊 |
-| `software-dev` | 全棧開發團隊 |
-| `hedge-fund` | 投資分析團隊 |
-| `strategy-room` | 策略討論室 |
+| 領域 | 用途 | 成熟度 |
+|------|------|--------|
+| IT 運維 | 自動化監控、故障排除 | ★★★★☆ |
+| 客戶服務 | 智能客服、問題分類 | ★★★★☆ |
+| 軟件工程 | 代碼生成、審查、測試 | ★★★☆☆ |
+| 供應鏈 | 需求預測、路線優化 | ★★★☆☆ |
+| 研究分析 | 文獻回顧、數據分析 | ★★☆☆☆ |
 
 ---
 
-## 6. Workspace 隔離系統
+## 5. 架構趨勢總結
 
-### 6.1 Git Worktree 隔離
+### 5.1 2026 年七大趨勢
 
-每個 Agent 獲得一個獨立嘅 git worktree：
+1. **多 Agent 編排**：從單體到微服務式 Agent 團隊
+2. **協議標準化**：MCP + A2A 建立 Agent 互聯網
+3. **企業擴展 Gap**：從實驗到 production 嘅鴻溝
+4. **治理與安全**：成為競爭差異化因素
+5. **記憶系統**：從無狀態到持續學習
+6. **小型模型**：SLM 成為 Agent 嘅 cost-effective 選擇
+7. **Agent 經濟**：可互操作嘅 Agent 市場正在形成
+
+### 5.2 技術架構建議
+
+對於構建多 Agent 系統，建議關注：
+
 ```
-原 repo: /home/user/project/
-    ↓
-Agent A: /home/user/project/.git/worktrees/clawteam-team-agent-a
-Agent B: /home/user/project/.git/worktrees/clawteam-team-agent-b
+Layer 1: 協議層
+    → MCP（工具連接）+ A2A（Agent 通訊）
+
+Layer 2: 編排層
+    → 狀態管理（DAG / State Machine）
+    → 衝突解決機制
+
+Layer 3: 記憶層
+    → Episodic + Semantic + Procedural
+    → 動態更新 + 混合檢索
+
+Layer 4: 監控層
+    → Agent 生命週期管理
+    → 成本追蹤
+    → 錯誤恢復
 ```
 
-**隔離效果：**
-- 每個 agent 有獨立嘅 working directory
-- 分支自動創建（`clawteam/{team}/{agent}`）
-- 代碼修改互不干擾
-- 可以 checkpoint（auto-commit）和 merge 回主分支
+### 5.3 對 OpenClaw / ClawTeam 嘅啟示
 
-### 6.2 衝突檢測
-
-```python
-def detect_overlaps(team_name, repo):
-    # 檢測多個 agent 修改同一文件嘅情況
-    # 返回: [{file, agents, severity}]
-```
+| 趨勢 | 對應現狀 | 建議 |
+|------|----------|------|
+| 多 Agent 編排 | ClawTeam 已實現 | 加強自動 handoff |
+| MCP + A2A | 未整合 | 考慮 native 支持 |
+| 記憶系統 | OpenClaw memory-lancedb-pro | 升級為三層記憶架構 |
+| 企業擴展 | 仍在 POC 階段 | 建立 production-ready 流程 |
+| Agent 經濟 | ClawHub 技能市場 | 擴展為 Agent 服務市場 |
 
 ---
 
-## 7. 生命週期管理
+## Sources
 
-### 7.1 Agent 狀態流轉
-
-```
-Spawned → Active → Idle → Shutdown
-    ↓         ↓       ↓
-  (crash)  (crash)  (timeout)
-    ↓         ↓       ↓
-  on-exit  on-exit  zombie detection
-```
-
-### 7.2 on-exit Hook
-
-Agent 進程退出時自動執行：
-1. 清理 session 文件
-2. 重置 in_progress tasks 為 pending
-3. 通知 Leader（透過 inbox）
-
-### 7.3 Zombie Detection
-
-```python
-def list_zombie_agents(team_name, max_hours=2.0):
-    # 檢測運行超過 max_hours 嘅 agents
-    # 透過 tmux pane liveness + PID check
-```
-
----
-
-## 8. 設計模式總結
-
-### 8.1 核心設計原則
-
-1. **Filesystem as Database**: 所有狀態存儲為 JSON files，用 file lock 做並發控制
-2. **Transport Abstraction**: 通訊層可替換（file / P2P / 未來嘅 Redis）
-3. **Identity via Environment**: Agent 身份透過環境變數傳遞，唔需要額外嘅認證
-4. **Atomic Operations**: 所有寫操作用 tmp + rename，防止 partial state
-5. **Graceful Degradation**: P2P 失敗時 fallback 到 file transport
-
-### 8.2 與 OpenClaw 嘅整合點
-
-- OpenClaw agent 作為 CLI 被 spawn（`openclaw agent --local --session-id ...`）
-- ClawTeam 負責協調，OpenClaw 負責執行
-- 兩者通過 tmux + 環境變數 + 文件系統溝通
-
-### 8.3 已知限制
-
-1. **blocked_by 只解鎖，唔自動 spawn**：Task 解鎖後需要 agent 自己 poll 或 Leader 手動觸發
-2. **File-based transport 嘅延遲**：依賴 poll interval（預設 1-5 秒）
-3. **單機限制**：P2P transport 雖然支持跨機，但 peer discovery 依賴共享文件系統
-4. **冇 built-in 嘅結果傳遞機制**：Agent 之間嘅數據傳遞依賴共享文件系統（reports/ 目錄）
-
----
-
-## 9. 架構評估
-
-### 9.1 優勢
-
-- **簡單可靠**：file-based storage 冇外部依賴（唔需要 Redis/PostgreSQL）
-- **可視化**：tmux backend 令所有 agent 嘅工作可見
-- **靈活**：transport 抽象層允許未來替換實現
-- **模板化**：TOML 模板令團隊配置可復用
-
-### 9.2 改進空間
-
-- **自動 Handoff**：blocked_by 解鎖後應自動觸發下一個 agent（目前需要手動）
-- **結果傳遞**：需要標準化嘅 artifact 傳遞機制（唔係依賴共享目錄）
-- **錯誤恢復**：agent crash 後嘅 task 重試機制可以更 robust
-- **跨機支持**：P2P transport 依賴共享文件系統做 peer discovery，限制咗真正嘅分布式部署
-
----
-
-_Sources: ClawTeam v0.2.0 source code analysis (HKUDS/ClawTeam)_
+- Gartner: Multi-agent system inquiries surged 1,445% (Q1 2024 → Q2 2025)
+- MarketsandMarkets: AI agent market $7.8B → $52B by 2030
+- McKinsey: Fewer than 1/4 organizations scaled agents to production
+- IBM: 2026 should be the year multi-agent systems move into production
+- Deloitte: Autonomous AI agent market could reach $8.5B by 2026
+- Mem0 paper (arXiv 2504.19413): Production-ready long-term memory
+- ICLR 2026 MemAgents Workshop: Memory architectures for LLM agents
+- A2A Protocol (Linux Foundation): Agent-to-Agent communication standard
+- MCP (Anthropic): 97M monthly SDK downloads by Feb 2026
+- CrewAI: 12M+ daily enterprise executions
+- LangGraph vs CrewAI vs AutoGen comparisons (multiple sources, 2026)
