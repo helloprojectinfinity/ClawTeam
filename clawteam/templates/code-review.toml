@@ -15,7 +15,9 @@ Workflow:
 2. Send the code context to each reviewer via `clawteam inbox send {team_name} [reviewer] "Please review ..."`
 3. Monitor progress via `clawteam board show {team_name}`
 4. Collect all review feedback via `clawteam inbox receive {team_name}`
-5. Synthesize findings into a unified review: critical issues, suggestions, and approval recommendation
+5. Read all review reports from reports/ directory
+6. Write a unified review report to reports/final-review.md
+7. Notify completion: `clawteam inbox send {team_name} integrator "Review done: reports/final-review.md"`
 
 Wait for ALL reviewers before writing the final summary."""
 
@@ -34,9 +36,12 @@ Your checklist:
 - Race conditions that could be exploited
 
 Check your tasks: `clawteam task list {team_name} --owner {agent_name}`
-Send findings to lead-reviewer:
-`clawteam inbox send {team_name} lead-reviewer "SECURITY: [critical|warning|clean] | FINDINGS: [details]"`
-Then: `clawteam task update {team_name} [task-id] --status completed`"""
+
+When done:
+1. Write your report to reports/security-review.md
+2. Send findings to lead-reviewer:
+`clawteam inbox send {team_name} lead-reviewer "SECURITY: [critical|warning|clean] | FINDINGS: [details] | Report: reports/security-review.md"`
+3. Update status: `clawteam task update {team_name} [task-id] --status completed`"""
 
 [[template.agents]]
 name = "perf-reviewer"
@@ -53,9 +58,12 @@ Your focus areas:
 - Concurrency issues (lock contention, thread safety)
 
 Check your tasks: `clawteam task list {team_name} --owner {agent_name}`
-Send findings to lead-reviewer:
-`clawteam inbox send {team_name} lead-reviewer "PERFORMANCE: [critical|warning|clean] | FINDINGS: [details]"`
-Then: `clawteam task update {team_name} [task-id] --status completed`"""
+
+When done:
+1. Write your report to reports/performance-review.md
+2. Send findings to lead-reviewer:
+`clawteam inbox send {team_name} lead-reviewer "PERFORMANCE: [critical|warning|clean] | FINDINGS: [details] | Report: reports/performance-review.md"`
+3. Update status: `clawteam task update {team_name} [task-id] --status completed`"""
 
 [[template.agents]]
 name = "arch-reviewer"
@@ -72,9 +80,12 @@ Your focus areas:
 - Documentation completeness
 
 Check your tasks: `clawteam task list {team_name} --owner {agent_name}`
-Send findings to lead-reviewer:
-`clawteam inbox send {team_name} lead-reviewer "ARCHITECTURE: [critical|warning|clean] | FINDINGS: [details]"`
-Then: `clawteam task update {team_name} [task-id] --status completed`"""
+
+When done:
+1. Write your report to reports/architecture-review.md
+2. Send findings to lead-reviewer:
+`clawteam inbox send {team_name} lead-reviewer "ARCHITECTURE: [critical|warning|clean] | FINDINGS: [details] | Report: reports/architecture-review.md"`
+3. Update status: `clawteam task update {team_name} [task-id] --status completed`"""
 
 [[template.tasks]]
 subject = "Coordinate review and synthesize findings"
