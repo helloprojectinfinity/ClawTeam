@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from clawteam.spawn.adapters import (
     NativeCliAdapter,
@@ -25,6 +26,76 @@ from clawteam.spawn.cli_env import build_spawn_path, resolve_clawteam_executable
 from clawteam.spawn.command_validation import validate_spawn_command
 
 _SHELL_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# 白名單：只允許以下前綴嘅環境變量傳入 tmux spawn
+# 防止惡意環境變量注入（例如 LD_PRELOAD, BASH_ENV 等）
+_ALLOWED_ENV_PREFIXES = (
+    "CLAWTEAM_",
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "LC_",
+    "TMPDIR",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "COLUMNS",
+    "LINES",
+    "DISPLAY",
+    "XDG_",
+    "SSH_",
+    "GPG_",
+    "NODE_",
+    "PYTHON",
+    "NPM_",
+    "GOPATH",
+    "GOROOT",
+    "JAVA_HOME",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "GOOGLE_",
+    "GEMINI_",
+    "MISTRAL_",
+    "OLLAMA_",
+    "CODEX_",
+    "CLAUDE_",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+
+# 明確禁止嘅危險環境變量（即使匹配前綴也拒絕）
+_BLOCKED_ENV_KEYS = frozenset({
+    "BASH_ENV",
+    "ENV",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "IFS",
+    "PS4",
+    "PROMPT_COMMAND",
+    "BASH_FUNC_*",
+})
+
+
+def _is_env_key_allowed(key: str) -> bool:
+    """Check if an environment variable key is allowed for tmux spawn."""
+    if key in _BLOCKED_ENV_KEYS:
+        return False
+    if any(key.startswith(blocked.rstrip("*")) for blocked in _BLOCKED_ENV_KEYS if blocked.endswith("*")):
+        return False
+    return any(key == prefix or key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES)
 
 
 class TmuxBackend(SpawnBackend):
@@ -50,6 +121,7 @@ class TmuxBackend(SpawnBackend):
         cwd: str | None = None,
         skip_permissions: bool = False,
         system_prompt: str | None = None,
+        no_wait: bool = False,
     ) -> str:
         if not shutil.which("tmux"):
             return "Error: tmux not installed"
@@ -74,7 +146,15 @@ class TmuxBackend(SpawnBackend):
         # Inject context awareness flags
         env_vars["CLAWTEAM_CONTEXT_ENABLED"] = "1"
         if env:
-            env_vars.update(env)
+            # 白名單過濾：只允許安全嘅環境變量傳入 tmux spawn
+            filtered_env = {k: v for k, v in env.items() if _is_env_key_allowed(k)}
+            dropped = set(env.keys()) - set(filtered_env.keys())
+            if dropped:
+                import logging
+                logging.getLogger("clawteam.spawn").warning(
+                    "Blocked env vars from tmux spawn: %s", ", ".join(sorted(dropped))
+                )
+            env_vars.update(filtered_env)
         env_vars["PATH"] = build_spawn_path(env_vars.get("PATH", os.environ.get("PATH")))
         if os.path.isabs(clawteam_bin):
             env_vars.setdefault("CLAWTEAM_BIN", clawteam_bin)
@@ -146,6 +226,20 @@ class TmuxBackend(SpawnBackend):
         if launch.returncode != 0:
             stderr = launch.stderr.decode() if isinstance(launch.stderr, bytes) else launch.stderr
             return f"Error: failed to launch tmux session: {(stderr or '').strip()}"
+
+        # no_wait mode: skip readiness polling, register and return immediately
+        if no_wait:
+            self._agents[agent_name] = target
+            from clawteam.spawn.registry import register_agent
+            register_agent(
+                team_name=team_name,
+                agent_name=agent_name,
+                backend="tmux",
+                tmux_target=target,
+                pid=0,
+                command=list(final_command),
+            )
+            return f"Agent '{agent_name}' launched in tmux ({target}, no_wait)"
 
         from clawteam.config import load_config
 
@@ -309,6 +403,39 @@ class TmuxBackend(SpawnBackend):
         session = TmuxBackend.session_name(team_name)
         subprocess.run(["tmux", "attach-session", "-t", session])
         return result
+
+    def spawn_batch(
+        self,
+        agents: list[dict],
+        team_name: str,
+    ) -> dict[str, str]:
+        """Spawn multiple agents in parallel (no-wait mode).
+
+        Each agent dict must contain: command, agent_name, agent_id, agent_type.
+        Optional: prompt, env, cwd, skip_permissions, system_prompt.
+
+        Returns dict mapping agent_name -> status message.
+        Uses no_wait=True to skip per-agent readiness polling, dramatically
+        reducing total spawn time for batches. Readiness is handled lazily
+        by the caller or via liveness checks.
+        """
+        results: dict[str, str] = {}
+        for agent_spec in agents:
+            result = self.spawn(
+                command=agent_spec["command"],
+                agent_name=agent_spec["agent_name"],
+                agent_id=agent_spec["agent_id"],
+                agent_type=agent_spec["agent_type"],
+                team_name=team_name,
+                prompt=agent_spec.get("prompt"),
+                env=agent_spec.get("env"),
+                cwd=agent_spec.get("cwd"),
+                skip_permissions=agent_spec.get("skip_permissions", False),
+                system_prompt=agent_spec.get("system_prompt"),
+                no_wait=True,
+            )
+            results[agent_spec["agent_name"]] = result
+        return results
 
 def _confirm_workspace_trust_if_prompted(
     target: str,
